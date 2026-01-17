@@ -110,3 +110,5 @@ export class CreateErrandDto {
   mediaAttachments?: MediaAttachmentDto[];
 }
 
+
+

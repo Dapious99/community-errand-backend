@@ -40,3 +40,5 @@ export class Location {
   errand: Errand;
 }
 
+
+
