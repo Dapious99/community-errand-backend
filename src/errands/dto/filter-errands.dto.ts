@@ -5,14 +5,14 @@ import {
   IsString,
   Min,
   Max,
-} from 'class-validator';
-import { Type } from 'class-transformer';
-import { ApiPropertyOptional } from '@nestjs/swagger';
+} from "class-validator";
+import { Type } from "class-transformer";
+import { ApiPropertyOptional } from "@nestjs/swagger";
 import {
   ErrandCategory,
   ErrandStatus,
   UrgencyLevel,
-} from '../entities/errand.entity';
+} from "../entities/errand.entity";
 
 export class FilterErrandsDto {
   @ApiPropertyOptional({ enum: ErrandCategory })
@@ -50,10 +50,10 @@ export class FilterErrandsDto {
   urgency?: UrgencyLevel;
 
   @ApiPropertyOptional({
-    enum: ['newest', 'price_high', 'price_low', 'distance'],
+    enum: ["newest", "price_high", "price_low", "distance"],
   })
   @IsOptional()
-  @IsEnum(['newest', 'price_high', 'price_low', 'distance'])
+  @IsEnum(["newest", "price_high", "price_low", "distance"])
   sortBy?: string;
 
   @ApiPropertyOptional()
@@ -71,6 +71,3 @@ export class FilterErrandsDto {
   @Max(100)
   limit?: number = 20;
 }
-
-
-

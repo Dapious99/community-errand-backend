@@ -5,19 +5,18 @@ import {
   ConnectedSocket,
   OnGatewayConnection,
   OnGatewayDisconnect,
-} from '@nestjs/websockets';
-import { Socket } from 'socket.io';
-import { UseGuards } from '@nestjs/common';
-import { MessagesService } from '../messages.service';
-import { CreateMessageDto } from '../dto/create-message.dto';
-import { JwtService } from '@nestjs/jwt';
-import { ConfigService } from '@nestjs/config';
+} from "@nestjs/websockets";
+import { Socket } from "socket.io";
+import { MessagesService } from "../messages.service";
+import { CreateMessageDto } from "../dto/create-message.dto";
+import { JwtService } from "@nestjs/jwt";
+import { ConfigService } from "@nestjs/config";
 
 @WebSocketGateway({
   cors: {
-    origin: '*',
+    origin: "*",
   },
-  namespace: '/messages',
+  namespace: "/messages",
 })
 export class MessagesGateway
   implements OnGatewayConnection, OnGatewayDisconnect
@@ -32,20 +31,22 @@ export class MessagesGateway
 
   async handleConnection(client: Socket) {
     try {
-      const token = client.handshake.auth?.token || client.handshake.headers?.authorization?.split(' ')[1];
+      const token =
+        client.handshake.auth?.token ||
+        client.handshake.headers?.authorization?.split(" ")[1];
       if (!token) {
         client.disconnect();
         return;
       }
 
       const payload = this.jwtService.verify(token, {
-        secret: this.configService.get<string>('JWT_SECRET'),
+        secret: this.configService.get<string>("JWT_SECRET"),
       });
 
       client.data.userId = payload.sub;
       console.log(`Client connected: ${client.id}, userId: ${payload.sub}`);
     } catch (error) {
-      console.error('Authentication failed:', error);
+      console.error("Authentication failed:", error);
       client.disconnect();
     }
   }
@@ -61,12 +62,23 @@ export class MessagesGateway
     });
   }
 
-  @SubscribeMessage('join_errand')
+  @SubscribeMessage("join_errand")
   async handleJoinErrand(
     @MessageBody() data: { errandId: string },
     @ConnectedSocket() client: Socket
   ) {
     const { errandId } = data;
+
+    try {
+      await this.messagesService.verifyParticipant(
+        errandId,
+        client.data.userId
+      );
+    } catch (error: any) {
+      client.emit("error", { message: error.message });
+      return;
+    }
+
     client.join(`errand:${errandId}`);
 
     if (!this.connectedClients.has(errandId)) {
@@ -74,10 +86,10 @@ export class MessagesGateway
     }
     this.connectedClients.get(errandId)?.add(client.id);
 
-    client.emit('joined_errand', { errandId });
+    client.emit("joined_errand", { errandId });
   }
 
-  @SubscribeMessage('send_message')
+  @SubscribeMessage("send_message")
   async handleSendMessage(
     @MessageBody() data: CreateMessageDto & { errandId: string },
     @ConnectedSocket() client: Socket
@@ -93,28 +105,25 @@ export class MessagesGateway
       );
 
       // Broadcast to all clients in the errand room
-      client.to(`errand:${errandId}`).emit('new_message', message);
-      client.emit('message_sent', message);
+      client.to(`errand:${errandId}`).emit("new_message", message);
+      client.emit("message_sent", message);
 
       return { success: true, message };
     } catch (error) {
-      client.emit('error', { message: error.message });
+      client.emit("error", { message: error.message });
       return { success: false, error: error.message };
     }
   }
 
-  @SubscribeMessage('typing')
+  @SubscribeMessage("typing")
   handleTyping(
     @MessageBody() data: { errandId: string; isTyping: boolean },
     @ConnectedSocket() client: Socket
   ) {
     const { errandId, isTyping } = data;
-    client.to(`errand:${errandId}`).emit('user_typing', {
+    client.to(`errand:${errandId}`).emit("user_typing", {
       userId: client.data.userId,
       isTyping,
     });
   }
 }
-
-
-

@@ -5,71 +5,89 @@ import {
   Body,
   Param,
   UseGuards,
+  Req,
   Request,
   HttpCode,
   HttpStatus,
   Headers,
-} from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
-import { PaymentsService } from './payments.service';
-import { InitializePaymentDto } from './dto/initialize-payment.dto';
-import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import * as crypto from 'crypto';
-import { ConfigService } from '@nestjs/config';
+  UnauthorizedException,
+} from "@nestjs/common";
+import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
+import { PaymentsService } from "./payments.service";
+import { InitializePaymentDto } from "./dto/initialize-payment.dto";
+import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import * as crypto from "crypto";
+import { ConfigService } from "@nestjs/config";
+import { Request as ExpressRequest } from "express";
 
-@ApiTags('payments')
-@Controller('payments')
+@ApiTags("payments")
+@Controller("payments")
 export class PaymentsController {
   constructor(
     private readonly paymentsService: PaymentsService,
     private configService: ConfigService
   ) {}
 
-  @Post('initialize')
+  @Post("initialize")
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Initialize payment for an errand' })
-  async initialize(@Body() initializePaymentDto: InitializePaymentDto, @Request() req) {
-    return this.paymentsService.initializePayment(initializePaymentDto, req.user.id);
+  @ApiOperation({ summary: "Initialize payment for an errand" })
+  async initialize(
+    @Body() initializePaymentDto: InitializePaymentDto,
+    @Request() req
+  ) {
+    return this.paymentsService.initializePayment(
+      initializePaymentDto,
+      req.user.id
+    );
   }
 
-  @Post('verify/:reference')
-  @ApiOperation({ summary: 'Verify a payment transaction' })
-  async verify(@Param('reference') reference: string) {
+  @Post("verify/:reference")
+  @ApiOperation({ summary: "Verify a payment transaction" })
+  async verify(@Param("reference") reference: string) {
     return this.paymentsService.verifyPayment(reference);
   }
 
-  @Post('webhook')
+  @Post("webhook")
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Paystack webhook endpoint' })
+  @ApiOperation({ summary: "Paystack webhook endpoint" })
   async webhook(
     @Body() body: any,
-    @Headers('x-paystack-signature') signature: string
+    @Req() req: ExpressRequest,
+    @Headers("x-paystack-signature") signature: string
   ) {
-    const webhookSecret = this.configService.get<string>('PAYSTACK_WEBHOOK_SECRET', '');
+    const webhookSecret = this.configService.get<string>(
+      "PAYSTACK_WEBHOOK_SECRET",
+      ""
+    );
 
-    // Verify webhook signature if secret is provided
-    if (webhookSecret && signature) {
+    if (webhookSecret) {
+      const rawBody = (req as any).rawBody as Buffer | undefined;
       const hash = crypto
-        .createHmac('sha512', webhookSecret)
-        .update(JSON.stringify(body))
-        .digest('hex');
+        .createHmac("sha512", webhookSecret)
+        .update(rawBody ?? JSON.stringify(body))
+        .digest("hex");
 
-      if (hash !== signature) {
-        throw new Error('Invalid signature');
+      const signatureBuffer = Buffer.from(signature ?? "", "utf8");
+      const hashBuffer = Buffer.from(hash, "utf8");
+      const isValid =
+        signatureBuffer.length === hashBuffer.length &&
+        crypto.timingSafeEqual(signatureBuffer, hashBuffer);
+
+      if (!isValid) {
+        throw new UnauthorizedException("Invalid webhook signature");
       }
     }
 
     return this.paymentsService.handleWebhook(body);
   }
 
-  @Get('payouts')
+  @Get("payouts")
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get user payouts' })
+  @ApiOperation({ summary: "Get user payouts" })
   async getPayouts(@Request() req) {
     return this.paymentsService.getPayouts(req.user.id);
   }
 }
-

@@ -6,15 +6,15 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-} from 'typeorm';
-import { User } from '../../users/entities/user.entity';
-import { Errand } from '../../errands/entities/errand.entity';
+} from "typeorm";
+import { User } from "../../users/entities/user.entity";
+import { Errand } from "../../errands/entities/errand.entity";
 
-@Entity('ratings')
-@Index(['toUserId', 'createdAt'])
-@Index(['errandId'])
+@Entity("ratings")
+@Index(["toUserId", "createdAt"])
+@Index(["errandId"])
 export class Rating {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column()
@@ -26,27 +26,24 @@ export class Rating {
   @Column()
   toUserId: string;
 
-  @Column('int')
+  @Column("int")
   rating: number; // 1-5
 
-  @Column('text', { nullable: true })
+  @Column("text", { nullable: true })
   review?: string;
 
   @CreateDateColumn()
   createdAt: Date;
 
-  @ManyToOne(() => Errand, (errand) => errand.ratings, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'errandId' })
+  @ManyToOne(() => Errand, (errand) => errand.ratings, { onDelete: "CASCADE" })
+  @JoinColumn({ name: "errandId" })
   errand: Errand;
 
   @ManyToOne(() => User, (user) => user.ratingsGiven)
-  @JoinColumn({ name: 'fromUserId' })
+  @JoinColumn({ name: "fromUserId" })
   fromUser: User;
 
   @ManyToOne(() => User, (user) => user.ratingsReceived)
-  @JoinColumn({ name: 'toUserId' })
+  @JoinColumn({ name: "toUserId" })
   toUser: User;
 }
-
-
-

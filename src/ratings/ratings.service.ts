@@ -3,13 +3,13 @@ import {
   NotFoundException,
   BadRequestException,
   ForbiddenException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource } from 'typeorm';
-import { Rating } from './entities/rating.entity';
-import { Errand, ErrandStatus } from '../errands/entities/errand.entity';
-import { User } from '../users/entities/user.entity';
-import { CreateRatingDto } from './dto/create-rating.dto';
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository, DataSource } from "typeorm";
+import { Rating } from "./entities/rating.entity";
+import { Errand, ErrandStatus } from "../errands/entities/errand.entity";
+import { User } from "../users/entities/user.entity";
+import { CreateRatingDto } from "./dto/create-rating.dto";
 
 @Injectable()
 export class RatingsService {
@@ -23,7 +23,10 @@ export class RatingsService {
     private dataSource: DataSource
   ) {}
 
-  async create(createRatingDto: CreateRatingDto, fromUserId: string): Promise<Rating> {
+  async create(
+    createRatingDto: CreateRatingDto,
+    fromUserId: string
+  ): Promise<Rating> {
     const { errandId, toUserId, ...ratingData } = createRatingDto;
 
     // Verify errand exists and is completed
@@ -32,29 +35,26 @@ export class RatingsService {
     });
 
     if (!errand) {
-      throw new NotFoundException('Errand not found');
+      throw new NotFoundException("Errand not found");
     }
 
     if (errand.status !== ErrandStatus.COMPLETED) {
-      throw new BadRequestException('Can only rate completed errands');
+      throw new BadRequestException("Can only rate completed errands");
     }
 
     // Verify user is part of the errand
     if (errand.requesterId !== fromUserId && errand.runnerId !== fromUserId) {
-      throw new ForbiddenException('You are not part of this errand');
+      throw new ForbiddenException("You are not part of this errand");
     }
 
     // Verify toUserId is the other party
-    if (
-      toUserId !== errand.requesterId &&
-      toUserId !== errand.runnerId
-    ) {
-      throw new BadRequestException('Invalid user to rate');
+    if (toUserId !== errand.requesterId && toUserId !== errand.runnerId) {
+      throw new BadRequestException("Invalid user to rate");
     }
 
     // Prevent self-rating
     if (toUserId === fromUserId) {
-      throw new BadRequestException('Cannot rate yourself');
+      throw new BadRequestException("Cannot rate yourself");
     }
 
     // Check if rating already exists
@@ -66,7 +66,7 @@ export class RatingsService {
     });
 
     if (existingRating) {
-      throw new BadRequestException('You have already rated this errand');
+      throw new BadRequestException("You have already rated this errand");
     }
 
     // Create rating
@@ -88,8 +88,8 @@ export class RatingsService {
   async findByUser(userId: string): Promise<Rating[]> {
     return this.ratingsRepository.find({
       where: { toUserId: userId },
-      relations: ['fromUser', 'errand'],
-      order: { createdAt: 'DESC' },
+      relations: ["fromUser", "errand"],
+      order: { createdAt: "DESC" },
     });
   }
 
@@ -116,10 +116,13 @@ export class RatingsService {
     const sum = ratings.reduce((acc, r) => acc + r.rating, 0);
     const averageRating = sum / totalRatings;
 
-    const distribution = ratings.reduce((acc, r) => {
-      acc[r.rating] = (acc[r.rating] || 0) + 1;
-      return acc;
-    }, {} as Record<number, number>);
+    const distribution = ratings.reduce(
+      (acc, r) => {
+        acc[r.rating] = (acc[r.rating] || 0) + 1;
+        return acc;
+      },
+      {} as Record<number, number>
+    );
 
     return {
       averageRating: parseFloat(averageRating.toFixed(2)),
@@ -141,6 +144,3 @@ export class RatingsService {
     });
   }
 }
-
-
-

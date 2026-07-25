@@ -1,9 +1,13 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import { Message } from './entities/message.entity';
-import { Errand } from '../errands/entities/errand.entity';
-import { CreateMessageDto } from './dto/create-message.dto';
+import {
+  Injectable,
+  NotFoundException,
+  ForbiddenException,
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
+import { Message } from "./entities/message.entity";
+import { Errand } from "../errands/entities/errand.entity";
+import { CreateMessageDto } from "./dto/create-message.dto";
 
 @Injectable()
 export class MessagesService {
@@ -25,11 +29,11 @@ export class MessagesService {
     });
 
     if (!errand) {
-      throw new NotFoundException('Errand not found');
+      throw new NotFoundException("Errand not found");
     }
 
     if (errand.requesterId !== userId && errand.runnerId !== userId) {
-      throw new ForbiddenException('You are not part of this errand');
+      throw new ForbiddenException("You are not part of this errand");
     }
 
     const message = this.messagesRepository.create({
@@ -42,26 +46,26 @@ export class MessagesService {
   }
 
   async findByErrand(errandId: string, userId: string): Promise<Message[]> {
-    // Verify user is part of errand
+    await this.verifyParticipant(errandId, userId);
+
+    return this.messagesRepository.find({
+      where: { errandId },
+      relations: ["fromUser"],
+      order: { createdAt: "ASC" },
+    });
+  }
+
+  async verifyParticipant(errandId: string, userId: string): Promise<void> {
     const errand = await this.errandsRepository.findOne({
       where: { id: errandId },
     });
 
     if (!errand) {
-      throw new NotFoundException('Errand not found');
+      throw new NotFoundException("Errand not found");
     }
 
     if (errand.requesterId !== userId && errand.runnerId !== userId) {
-      throw new ForbiddenException('You are not part of this errand');
+      throw new ForbiddenException("You are not part of this errand");
     }
-
-    return this.messagesRepository.find({
-      where: { errandId },
-      relations: ['fromUser'],
-      order: { createdAt: 'ASC' },
-    });
   }
 }
-
-
-

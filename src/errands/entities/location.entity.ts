@@ -4,24 +4,25 @@ import {
   Column,
   ManyToOne,
   JoinColumn,
-} from 'typeorm';
-import { Errand } from './errand.entity';
+} from "typeorm";
+import { Errand } from "./errand.entity";
+import { DecimalColumnTransformer } from "../../common/transformers/decimal.transformer";
 
 export enum LocationType {
-  PICKUP = 'pickup',
-  DROPOFF = 'dropoff',
+  PICKUP = "pickup",
+  DROPOFF = "dropoff",
 }
 
-@Entity('locations')
+@Entity("locations")
 export class Location {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column()
   errandId: string;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: LocationType,
   })
   type: LocationType;
@@ -29,16 +30,25 @@ export class Location {
   @Column()
   label: string;
 
-  @Column('decimal', { precision: 10, scale: 8, nullable: true })
+  @Column("decimal", {
+    precision: 10,
+    scale: 8,
+    nullable: true,
+    transformer: new DecimalColumnTransformer(),
+  })
   latitude?: number;
 
-  @Column('decimal', { precision: 11, scale: 8, nullable: true })
+  @Column("decimal", {
+    precision: 11,
+    scale: 8,
+    nullable: true,
+    transformer: new DecimalColumnTransformer(),
+  })
   longitude?: number;
 
-  @ManyToOne(() => Errand, (errand) => errand.locations, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'errandId' })
+  @ManyToOne(() => Errand, (errand) => errand.locations, {
+    onDelete: "CASCADE",
+  })
+  @JoinColumn({ name: "errandId" })
   errand: Errand;
 }
-
-
-

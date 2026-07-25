@@ -7,29 +7,30 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-} from 'typeorm';
-import { Errand } from '../../errands/entities/errand.entity';
-import { User } from '../../users/entities/user.entity';
+} from "typeorm";
+import { Errand } from "../../errands/entities/errand.entity";
+import { User } from "../../users/entities/user.entity";
+import { DecimalColumnTransformer } from "../../common/transformers/decimal.transformer";
 
 export enum PaymentType {
-  ESCROW = 'escrow',
-  PAYOUT = 'payout',
-  REFUND = 'refund',
+  ESCROW = "escrow",
+  PAYOUT = "payout",
+  REFUND = "refund",
 }
 
 export enum PaymentStatus {
-  PENDING = 'pending',
-  PROCESSING = 'processing',
-  SUCCESS = 'success',
-  FAILED = 'failed',
-  CANCELLED = 'cancelled',
+  PENDING = "pending",
+  PROCESSING = "processing",
+  SUCCESS = "success",
+  FAILED = "failed",
+  CANCELLED = "cancelled",
 }
 
-@Entity('payments')
-@Index(['errandId', 'status'])
-@Index(['userId', 'status'])
+@Entity("payments")
+@Index(["errandId", "status"])
+@Index(["userId", "status"])
 export class Payment {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column()
@@ -38,17 +39,21 @@ export class Payment {
   @Column()
   userId: string;
 
-  @Column('decimal', { precision: 10, scale: 2 })
+  @Column("decimal", {
+    precision: 10,
+    scale: 2,
+    transformer: new DecimalColumnTransformer(),
+  })
   amount: number;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: PaymentType,
   })
   type: PaymentType;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: PaymentStatus,
     default: PaymentStatus.PENDING,
   })
@@ -60,7 +65,7 @@ export class Payment {
   @Column({ nullable: true })
   paystackAuthorizationUrl?: string;
 
-  @Column('text', { nullable: true })
+  @Column("text", { nullable: true })
   description?: string;
 
   @CreateDateColumn()
@@ -70,13 +75,10 @@ export class Payment {
   updatedAt: Date;
 
   @ManyToOne(() => Errand)
-  @JoinColumn({ name: 'errandId' })
+  @JoinColumn({ name: "errandId" })
   errand: Errand;
 
   @ManyToOne(() => User)
-  @JoinColumn({ name: 'userId' })
+  @JoinColumn({ name: "userId" })
   user: User;
 }
-
-
-

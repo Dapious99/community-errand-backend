@@ -1,10 +1,10 @@
-import { Module } from '@nestjs/common';
-import { TypeOrmModule } from '@nestjs/typeorm';
-import { RatingsService } from './ratings.service';
-import { RatingsController } from './ratings.controller';
-import { Rating } from './entities/rating.entity';
-import { Errand } from '../errands/entities/errand.entity';
-import { User } from '../users/entities/user.entity';
+import { Module } from "@nestjs/common";
+import { TypeOrmModule } from "@nestjs/typeorm";
+import { RatingsService } from "./ratings.service";
+import { RatingsController } from "./ratings.controller";
+import { Rating } from "./entities/rating.entity";
+import { Errand } from "../errands/entities/errand.entity";
+import { User } from "../users/entities/user.entity";
 
 @Module({
   imports: [TypeOrmModule.forFeature([Rating, Errand, User])],
@@ -13,6 +13,3 @@ import { User } from '../users/entities/user.entity';
   exports: [RatingsService],
 })
 export class RatingsModule {}
-
-
-

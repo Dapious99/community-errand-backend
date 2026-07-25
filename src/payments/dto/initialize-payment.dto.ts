@@ -1,5 +1,5 @@
-import { IsString, IsNumber, Min } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, IsNumber, Min } from "class-validator";
+import { ApiProperty } from "@nestjs/swagger";
 
 export class InitializePaymentDto {
   @ApiProperty()
@@ -15,6 +15,3 @@ export class InitializePaymentDto {
   @Min(1)
   amount: number;
 }
-
-
-

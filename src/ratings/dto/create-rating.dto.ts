@@ -1,12 +1,19 @@
-import { IsNumber, IsOptional, IsString, Min, Max, MinLength } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import {
+  IsNumber,
+  IsOptional,
+  IsString,
+  Min,
+  Max,
+  MinLength,
+} from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 export class CreateRatingDto {
-  @ApiProperty({ example: 'errand-uuid' })
+  @ApiProperty({ example: "errand-uuid" })
   @IsString()
   errandId: string;
 
-  @ApiProperty({ example: 'user-uuid' })
+  @ApiProperty({ example: "user-uuid" })
   @IsString()
   toUserId: string;
 
@@ -22,6 +29,3 @@ export class CreateRatingDto {
   @MinLength(3)
   review?: string;
 }
-
-
-

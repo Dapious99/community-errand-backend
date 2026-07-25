@@ -6,18 +6,18 @@ import {
   UpdateDateColumn,
   OneToOne,
   JoinColumn,
-} from 'typeorm';
-import { User } from './user.entity';
+} from "typeorm";
+import { User } from "./user.entity";
 
 export enum KYCStatus {
-  PENDING = 'pending',
-  APPROVED = 'approved',
-  REJECTED = 'rejected',
+  PENDING = "pending",
+  APPROVED = "approved",
+  REJECTED = "rejected",
 }
 
-@Entity('kyc')
+@Entity("kyc")
 export class KYC {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column()
@@ -35,8 +35,11 @@ export class KYC {
   @Column({ nullable: true })
   bankName?: string;
 
+  @Column({ nullable: true })
+  paystackRecipientCode?: string;
+
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: KYCStatus,
     default: KYCStatus.PENDING,
   })
@@ -52,9 +55,6 @@ export class KYC {
   updatedAt: Date;
 
   @OneToOne(() => User, (user) => user.kyc)
-  @JoinColumn({ name: 'userId' })
+  @JoinColumn({ name: "userId" })
   user: User;
 }
-
-
-

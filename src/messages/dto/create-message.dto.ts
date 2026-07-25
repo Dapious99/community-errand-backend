@@ -1,5 +1,5 @@
-import { IsString, MinLength } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { IsString, MinLength } from "class-validator";
+import { ApiProperty } from "@nestjs/swagger";
 
 export class CreateMessageDto {
   @ApiProperty()
@@ -7,6 +7,3 @@ export class CreateMessageDto {
   @MinLength(1)
   text: string;
 }
-
-
-

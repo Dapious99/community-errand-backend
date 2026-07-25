@@ -8,15 +8,12 @@ import {
   Min,
   MinLength,
   IsDateString,
-} from 'class-validator';
-import { Type } from 'class-transformer';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import {
-  ErrandCategory,
-  UrgencyLevel,
-} from '../entities/errand.entity';
-import { LocationType } from '../entities/location.entity';
-import { MediaType } from '../entities/media-attachment.entity';
+} from "class-validator";
+import { Type } from "class-transformer";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { ErrandCategory, UrgencyLevel } from "../entities/errand.entity";
+import { LocationType } from "../entities/location.entity";
+import { MediaType } from "../entities/media-attachment.entity";
 
 class LocationDto {
   @ApiProperty({ enum: LocationType })
@@ -109,6 +106,3 @@ export class CreateErrandDto {
   @Type(() => MediaAttachmentDto)
   mediaAttachments?: MediaAttachmentDto[];
 }
-
-
-

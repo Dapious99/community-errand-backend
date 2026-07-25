@@ -2,19 +2,26 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
-} from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
-import * as bcrypt from 'bcrypt';
-import { User, UserRole } from './entities/user.entity';
-import { CreateUserDto } from './dto/create-user.dto';
-import { UpdateUserDto } from './dto/update-user.dto';
+  BadRequestException,
+} from "@nestjs/common";
+import { InjectRepository } from "@nestjs/typeorm";
+import { Repository } from "typeorm";
+import * as bcrypt from "bcrypt";
+import { User, UserRole } from "./entities/user.entity";
+import { KYC, KYCStatus } from "./entities/kyc.entity";
+import { CreateUserDto } from "./dto/create-user.dto";
+import { UpdateUserDto } from "./dto/update-user.dto";
+import { CreateKycDto } from "./dto/create-kyc.dto";
+import { RatingsService } from "../ratings/ratings.service";
 
 @Injectable()
 export class UsersService {
   constructor(
     @InjectRepository(User)
-    private usersRepository: Repository<User>
+    private usersRepository: Repository<User>,
+    @InjectRepository(KYC)
+    private kycRepository: Repository<KYC>,
+    private ratingsService: RatingsService
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
@@ -26,7 +33,9 @@ export class UsersService {
     });
 
     if (existingUser) {
-      throw new ConflictException('User with this email or phone already exists');
+      throw new ConflictException(
+        "User with this email or phone already exists"
+      );
     }
 
     // Hash password
@@ -46,11 +55,11 @@ export class UsersService {
   async findOne(id: string): Promise<User> {
     const user = await this.usersRepository.findOne({
       where: { id },
-      relations: ['kyc'],
+      relations: ["kyc"],
     });
 
     if (!user) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("User not found");
     }
 
     return user;
@@ -67,10 +76,47 @@ export class UsersService {
     return this.usersRepository.save(user);
   }
 
-  async updateRatingAvg(userId: string): Promise<void> {
-    const user = await this.findOne(userId);
-    // This will be called from ratings service
-    // For now, we'll calculate it when needed
+  async submitKyc(userId: string, createKycDto: CreateKycDto): Promise<KYC> {
+    await this.findOne(userId);
+
+    let kyc = await this.kycRepository.findOne({ where: { userId } });
+
+    if (kyc && kyc.status === KYCStatus.APPROVED) {
+      throw new BadRequestException("KYC has already been approved");
+    }
+
+    if (kyc) {
+      Object.assign(kyc, createKycDto, { status: KYCStatus.PENDING });
+    } else {
+      kyc = this.kycRepository.create({
+        ...createKycDto,
+        userId,
+        status: KYCStatus.PENDING,
+      });
+    }
+
+    return this.kycRepository.save(kyc);
+  }
+
+  async getKyc(userId: string): Promise<KYC> {
+    const kyc = await this.kycRepository.findOne({ where: { userId } });
+
+    if (!kyc) {
+      throw new NotFoundException("KYC submission not found");
+    }
+
+    return kyc;
+  }
+
+  async getUserRatings(userId: string) {
+    await this.findOne(userId);
+
+    const [ratings, stats] = await Promise.all([
+      this.ratingsService.findByUser(userId),
+      this.ratingsService.getStats(userId),
+    ]);
+
+    return { ratings, stats };
   }
 
   async getUserStats(userId: string) {
@@ -78,27 +124,24 @@ export class UsersService {
 
     const [errandsPosted, errandsAccepted] = await Promise.all([
       this.usersRepository
-        .createQueryBuilder('user')
-        .leftJoin('user.errandsPosted', 'errand')
-        .where('user.id = :userId', { userId })
-        .select('COUNT(errand.id)', 'total')
+        .createQueryBuilder("user")
+        .leftJoin("user.errandsPosted", "errand")
+        .where("user.id = :userId", { userId })
+        .select("COUNT(errand.id)", "total")
         .getRawOne(),
       this.usersRepository
-        .createQueryBuilder('user')
-        .leftJoin('user.errandsAccepted', 'errand')
-        .where('user.id = :userId', { userId })
-        .select('COUNT(errand.id)', 'total')
+        .createQueryBuilder("user")
+        .leftJoin("user.errandsAccepted", "errand")
+        .where("user.id = :userId", { userId })
+        .select("COUNT(errand.id)", "total")
         .getRawOne(),
     ]);
 
     return {
-      errandsPosted: parseInt(errandsPosted?.total || '0', 10),
-      errandsAccepted: parseInt(errandsAccepted?.total || '0', 10),
+      errandsPosted: parseInt(errandsPosted?.total || "0", 10),
+      errandsAccepted: parseInt(errandsAccepted?.total || "0", 10),
       rating: user.ratingAvg,
       role: user.role,
     };
   }
 }
-
-
-

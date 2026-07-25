@@ -5,29 +5,29 @@ import {
   IsOptional,
   IsEnum,
   Matches,
-} from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { UserRole } from '../entities/user.entity';
+} from "class-validator";
+import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
+import { UserRole } from "../entities/user.entity";
 
 export class CreateUserDto {
-  @ApiProperty({ example: 'user@example.com' })
+  @ApiProperty({ example: "user@example.com" })
   @IsEmail()
   email: string;
 
-  @ApiPropertyOptional({ example: '+2348012345678' })
+  @ApiPropertyOptional({ example: "+2348012345678" })
   @IsOptional()
   @IsString()
   @Matches(/^\+?[1-9]\d{1,14}$/, {
-    message: 'Phone number must be in valid international format',
+    message: "Phone number must be in valid international format",
   })
   phone?: string;
 
-  @ApiProperty({ example: 'John Doe' })
+  @ApiProperty({ example: "John Doe" })
   @IsString()
   @MinLength(2)
   name: string;
 
-  @ApiProperty({ example: 'password123', minLength: 6 })
+  @ApiProperty({ example: "password123", minLength: 6 })
   @IsString()
   @MinLength(6)
   password: string;
@@ -37,6 +37,3 @@ export class CreateUserDto {
   @IsEnum(UserRole)
   role?: UserRole;
 }
-
-
-

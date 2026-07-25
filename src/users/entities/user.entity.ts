@@ -7,22 +7,23 @@ import {
   OneToMany,
   OneToOne,
   Index,
-} from 'typeorm';
-import { Exclude } from 'class-transformer';
-import { Errand } from '../../errands/entities/errand.entity';
-import { KYC } from './kyc.entity';
-import { Rating } from '../../ratings/entities/rating.entity';
-import { Message } from '../../messages/entities/message.entity';
+} from "typeorm";
+import { Exclude } from "class-transformer";
+import { Errand } from "../../errands/entities/errand.entity";
+import { KYC } from "./kyc.entity";
+import { Rating } from "../../ratings/entities/rating.entity";
+import { Message } from "../../messages/entities/message.entity";
+import { DecimalColumnTransformer } from "../../common/transformers/decimal.transformer";
 
 export enum UserRole {
-  REQUESTER = 'requester',
-  RUNNER = 'runner',
-  BOTH = 'both',
+  REQUESTER = "requester",
+  RUNNER = "runner",
+  BOTH = "both",
 }
 
-@Entity('users')
+@Entity("users")
 export class User {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column({ unique: true })
@@ -41,7 +42,7 @@ export class User {
   passwordHash: string;
 
   @Column({
-    type: 'enum',
+    type: "enum",
     enum: UserRole,
     default: UserRole.REQUESTER,
   })
@@ -50,7 +51,12 @@ export class User {
   @Column({ default: false })
   verified: boolean;
 
-  @Column('decimal', { precision: 3, scale: 2, default: 0 })
+  @Column("decimal", {
+    precision: 3,
+    scale: 2,
+    default: 0,
+    transformer: new DecimalColumnTransformer(),
+  })
   ratingAvg: number;
 
   @Column({ nullable: true })
@@ -81,6 +87,3 @@ export class User {
   @OneToMany(() => Message, (message) => message.fromUser)
   messages: Message[];
 }
-
-
-

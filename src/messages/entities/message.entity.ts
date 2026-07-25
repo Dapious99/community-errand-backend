@@ -6,14 +6,14 @@ import {
   ManyToOne,
   JoinColumn,
   Index,
-} from 'typeorm';
-import { User } from '../../users/entities/user.entity';
-import { Errand } from '../../errands/entities/errand.entity';
+} from "typeorm";
+import { User } from "../../users/entities/user.entity";
+import { Errand } from "../../errands/entities/errand.entity";
 
-@Entity('messages')
-@Index(['errandId', 'createdAt'])
+@Entity("messages")
+@Index(["errandId", "createdAt"])
 export class Message {
-  @PrimaryGeneratedColumn('uuid')
+  @PrimaryGeneratedColumn("uuid")
   id: string;
 
   @Column()
@@ -22,20 +22,17 @@ export class Message {
   @Column()
   fromUserId: string;
 
-  @Column('text')
+  @Column("text")
   text: string;
 
   @CreateDateColumn()
   createdAt: Date;
 
-  @ManyToOne(() => Errand, (errand) => errand.messages, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'errandId' })
+  @ManyToOne(() => Errand, (errand) => errand.messages, { onDelete: "CASCADE" })
+  @JoinColumn({ name: "errandId" })
   errand: Errand;
 
   @ManyToOne(() => User, (user) => user.messages)
-  @JoinColumn({ name: 'fromUserId' })
+  @JoinColumn({ name: "fromUserId" })
   fromUser: User;
 }
-
-
-
