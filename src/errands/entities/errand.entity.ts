@@ -101,6 +101,12 @@ export class Errand {
   @Column({ type: "timestamp", nullable: true })
   completedAt?: Date;
 
+  @Column({ default: false })
+  isBoosted: boolean;
+
+  @Column({ type: "timestamp", nullable: true })
+  boostedAt?: Date;
+
   @CreateDateColumn()
   createdAt: Date;
 

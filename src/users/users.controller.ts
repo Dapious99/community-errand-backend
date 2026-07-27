@@ -14,6 +14,8 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
 import { UsersService } from "./users.service";
 import { UpdateUserDto } from "./dto/update-user.dto";
 import { CreateKycDto } from "./dto/create-kyc.dto";
+import { ConfirmBankChangeDto } from "./dto/confirm-bank-change.dto";
+import { UpdateLocationDto } from "./dto/update-location.dto";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 
 @ApiTags("users")
@@ -52,6 +54,36 @@ export class UsersController {
   @ApiOperation({ summary: "Get current user KYC status" })
   async getKyc(@Request() req) {
     return this.usersService.getKyc(req.user.id);
+  }
+
+  @Post("kyc/confirm-bank-change")
+  @ApiOperation({
+    summary: "Confirm a pending bank detail change with the emailed code",
+  })
+  async confirmBankChange(
+    @Request() req,
+    @Body() confirmBankChangeDto: ConfirmBankChangeDto
+  ) {
+    return this.usersService.confirmBankChange(
+      req.user.id,
+      confirmBankChangeDto.code
+    );
+  }
+
+  @Patch("location")
+  @ApiOperation({
+    summary: "Report the current user's last known location (runners)",
+  })
+  async updateLocation(
+    @Request() req,
+    @Body() updateLocationDto: UpdateLocationDto
+  ) {
+    await this.usersService.updateLocation(
+      req.user.id,
+      updateLocationDto.latitude,
+      updateLocationDto.longitude
+    );
+    return { message: "Location updated" };
   }
 
   @Get(":id/ratings")

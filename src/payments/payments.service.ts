@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository, DataSource } from "typeorm";
 import { ConfigService } from "@nestjs/config";
+import { EventEmitter2 } from "@nestjs/event-emitter";
 import { Payment, PaymentType, PaymentStatus } from "./entities/payment.entity";
 import { Errand, ErrandStatus } from "../errands/entities/errand.entity";
 import { User } from "../users/entities/user.entity";
@@ -30,6 +31,7 @@ export class PaymentsService {
     private kycRepository: Repository<KYC>,
     private paystackService: PaystackService,
     private configService: ConfigService,
+    private eventEmitter: EventEmitter2,
     private dataSource: DataSource
   ) {}
 
@@ -115,6 +117,56 @@ export class PaymentsService {
     };
   }
 
+  /**
+   * Initializes a system-determined (not client-supplied) charge for the
+   * AI-Boost feature. Unlike escrow, the boost's actual effects (title
+   * rewrite, isBoosted flag, runner notifications) only activate once the
+   * webhook confirms this payment succeeded - see the `payment.boost.succeeded`
+   * event handler in ErrandsService - so a user can't get boosted-listing
+   * perks without actually completing the charge.
+   */
+  async initializeBoostPayment(
+    errandId: string,
+    userId: string,
+    email: string,
+    amount: number
+  ) {
+    const errand = await this.errandsRepository.findOne({
+      where: { id: errandId },
+    });
+    if (!errand) {
+      throw new NotFoundException("Errand not found");
+    }
+
+    const reference = `boost-${errandId}-${Date.now()}`;
+
+    const paystackResponse = await this.paystackService.initializePayment(
+      email,
+      amount,
+      reference,
+      { errandId, userId, purpose: "boost" }
+    );
+
+    const payment = this.paymentsRepository.create({
+      errandId,
+      userId,
+      amount,
+      type: PaymentType.BOOST,
+      status: PaymentStatus.PENDING,
+      paystackReference: paystackResponse.data.reference,
+      paystackAuthorizationUrl: paystackResponse.data.authorization_url,
+      description: `AI-Boost for errand: ${errand.title}`,
+    });
+
+    await this.paymentsRepository.save(payment);
+
+    return {
+      paymentId: payment.id,
+      authorizationUrl: paystackResponse.data.authorization_url,
+      reference: paystackResponse.data.reference,
+    };
+  }
+
   async verifyPayment(reference: string) {
     const payment = await this.paymentsRepository.findOne({
       where: { paystackReference: reference },
@@ -158,6 +210,12 @@ export class PaymentsService {
       if (payment) {
         payment.status = PaymentStatus.SUCCESS;
         await this.paymentsRepository.save(payment);
+
+        if (payment.type === PaymentType.BOOST) {
+          this.eventEmitter.emit("payment.boost.succeeded", {
+            errandId: payment.errandId,
+          });
+        }
       }
     }
 

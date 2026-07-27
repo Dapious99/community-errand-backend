@@ -1,0 +1,139 @@
+import { Test, TestingModule } from "@nestjs/testing";
+import { BadRequestException } from "@nestjs/common";
+import { ConfigService } from "@nestjs/config";
+import { OtpService } from "./otp.service";
+import { RedisService } from "../common/redis/redis.service";
+import { MailService } from "../mail/mail.service";
+import { OtpPurpose } from "./otp-purpose.enum";
+
+describe("OtpService", () => {
+  let service: OtpService;
+  let redisService: jest.Mocked<RedisService>;
+  let mailService: jest.Mocked<MailService>;
+  let store: Map<string, string>;
+
+  beforeEach(async () => {
+    store = new Map();
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        OtpService,
+        {
+          provide: RedisService,
+          useValue: {
+            set: jest.fn((key: string, value: string) => {
+              store.set(key, value);
+              return Promise.resolve();
+            }),
+            get: jest.fn((key: string) =>
+              Promise.resolve(store.get(key) ?? null)
+            ),
+            del: jest.fn((...keys: string[]) => {
+              keys.forEach((k) => store.delete(k));
+              return Promise.resolve();
+            }),
+            incr: jest.fn((key: string) => {
+              const next = (parseInt(store.get(key) ?? "0", 10) + 1).toString();
+              store.set(key, next);
+              return Promise.resolve(parseInt(next, 10));
+            }),
+          },
+        },
+        {
+          provide: MailService,
+          useValue: { send: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: ConfigService,
+          useValue: { get: jest.fn((key: string, fallback?: any) => fallback) },
+        },
+      ],
+    }).compile();
+
+    service = module.get(OtpService);
+    redisService = module.get(RedisService);
+    mailService = module.get(MailService);
+  });
+
+  it("emails a 6-digit code and stores it with a 0 attempts counter", async () => {
+    await service.request(
+      OtpPurpose.SIGNUP_VERIFICATION,
+      "user-1",
+      "user@example.com"
+    );
+
+    expect(mailService.send).toHaveBeenCalledTimes(1);
+    const [to, , html] = mailService.send.mock.calls[0];
+    expect(to).toBe("user@example.com");
+    expect(html).toMatch(/\d{6}/);
+    expect(redisService.set).toHaveBeenCalledWith(
+      expect.stringContaining("otp:signup_verification:user-1"),
+      expect.any(String),
+      600
+    );
+  });
+
+  it("verifies successfully with the correct code and cleans up its keys", async () => {
+    await service.request(
+      OtpPurpose.PASSWORD_RESET,
+      "user-1",
+      "user@example.com",
+      {
+        hint: "reset",
+      }
+    );
+    const [, , html] = mailService.send.mock.calls[0];
+    const code = html.match(/(\d{6})/)[1];
+
+    const metadata = await service.verify(
+      OtpPurpose.PASSWORD_RESET,
+      "user-1",
+      code
+    );
+
+    expect(metadata).toEqual({ hint: "reset" });
+    expect(store.size).toBe(0);
+  });
+
+  it("rejects an incorrect code and increments the attempt counter", async () => {
+    await service.request(
+      OtpPurpose.PASSWORD_RESET,
+      "user-1",
+      "user@example.com"
+    );
+
+    await expect(
+      service.verify(OtpPurpose.PASSWORD_RESET, "user-1", "000000")
+    ).rejects.toThrow(BadRequestException);
+
+    expect(redisService.incr).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws when no code was ever requested for that identifier", async () => {
+    await expect(
+      service.verify(OtpPurpose.PASSWORD_RESET, "ghost", "123456")
+    ).rejects.toThrow(BadRequestException);
+  });
+
+  it("invalidates the code once the max attempts are exhausted", async () => {
+    await service.request(
+      OtpPurpose.PASSWORD_RESET,
+      "user-1",
+      "user@example.com"
+    );
+    const [, , html] = mailService.send.mock.calls[0];
+    const code = html.match(/(\d{6})/)[1];
+    const wrongCode = code === "000000" ? "111111" : "000000";
+
+    for (let i = 0; i < 5; i++) {
+      await expect(
+        service.verify(OtpPurpose.PASSWORD_RESET, "user-1", wrongCode)
+      ).rejects.toThrow(BadRequestException);
+    }
+
+    // Even the correct code no longer works - the record was wiped after 5 misses.
+    await expect(
+      service.verify(OtpPurpose.PASSWORD_RESET, "user-1", code)
+    ).rejects.toThrow("Too many incorrect attempts. Request a new code.");
+  });
+});

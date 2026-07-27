@@ -4,6 +4,7 @@ import {
   IsEnum,
   IsOptional,
   IsArray,
+  IsBoolean,
   ValidateNested,
   Min,
   MinLength,
@@ -105,4 +106,12 @@ export class CreateErrandDto {
   @ValidateNested({ each: true })
   @Type(() => MediaAttachmentDto)
   mediaAttachments?: MediaAttachmentDto[];
+
+  @ApiPropertyOptional({
+    description:
+      "Pay the configurable AI-Boost fee to get an AI-rewritten title and an immediate notification to nearby top-rated runners. Activates once payment is confirmed, not on request.",
+  })
+  @IsOptional()
+  @IsBoolean()
+  isBoosted?: boolean;
 }

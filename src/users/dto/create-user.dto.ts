@@ -36,4 +36,12 @@ export class CreateUserDto {
   @IsOptional()
   @IsEnum(UserRole)
   role?: UserRole;
+
+  @ApiPropertyOptional({
+    description:
+      "A stable identifier generated and persisted by the client (e.g. a UUID saved in AsyncStorage/localStorage). If provided, this device is trusted immediately so future logins from it skip the new-device OTP check.",
+  })
+  @IsOptional()
+  @IsString()
+  deviceId?: string;
 }

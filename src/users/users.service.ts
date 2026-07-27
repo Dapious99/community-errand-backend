@@ -2,7 +2,6 @@ import {
   Injectable,
   NotFoundException,
   ConflictException,
-  BadRequestException,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
@@ -13,6 +12,8 @@ import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
 import { CreateKycDto } from "./dto/create-kyc.dto";
 import { RatingsService } from "../ratings/ratings.service";
+import { OtpService } from "../otp/otp.service";
+import { OtpPurpose } from "../otp/otp-purpose.enum";
 
 @Injectable()
 export class UsersService {
@@ -21,7 +22,8 @@ export class UsersService {
     private usersRepository: Repository<User>,
     @InjectRepository(KYC)
     private kycRepository: Repository<KYC>,
-    private ratingsService: RatingsService
+    private ratingsService: RatingsService,
+    private otpService: OtpService
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
@@ -76,25 +78,73 @@ export class UsersService {
     return this.usersRepository.save(user);
   }
 
-  async submitKyc(userId: string, createKycDto: CreateKycDto): Promise<KYC> {
-    await this.findOne(userId);
+  async setVerified(id: string): Promise<void> {
+    await this.usersRepository.update(id, { verified: true });
+  }
 
-    let kyc = await this.kycRepository.findOne({ where: { userId } });
+  async setPassword(id: string, passwordHash: string): Promise<void> {
+    await this.usersRepository.update(id, { passwordHash });
+  }
 
-    if (kyc && kyc.status === KYCStatus.APPROVED) {
-      throw new BadRequestException("KYC has already been approved");
+  async submitKyc(
+    userId: string,
+    createKycDto: CreateKycDto
+  ): Promise<KYC | { requiresConfirmation: true; message: string }> {
+    const user = await this.findOne(userId);
+    const kyc = await this.kycRepository.findOne({ where: { userId } });
+
+    const isBankChange =
+      !!kyc &&
+      kyc.status === KYCStatus.APPROVED &&
+      ((createKycDto.bankAccountNumber !== undefined &&
+        createKycDto.bankAccountNumber !== kyc.bankAccountNumber) ||
+        (createKycDto.bankName !== undefined &&
+          createKycDto.bankName !== kyc.bankName));
+
+    if (isBankChange) {
+      await this.otpService.request(
+        OtpPurpose.BANK_CHANGE,
+        userId,
+        user.email,
+        {
+          pendingChanges: createKycDto,
+        }
+      );
+
+      return {
+        requiresConfirmation: true,
+        message:
+          "A confirmation code has been emailed to you to approve this bank detail change.",
+      };
     }
 
     if (kyc) {
-      Object.assign(kyc, createKycDto, { status: KYCStatus.PENDING });
-    } else {
-      kyc = this.kycRepository.create({
-        ...createKycDto,
-        userId,
-        status: KYCStatus.PENDING,
+      Object.assign(kyc, createKycDto, {
+        // A non-bank edit to an already-approved KYC (e.g. re-uploading the ID
+        // card) doesn't need to go back through review.
+        status:
+          kyc.status === KYCStatus.APPROVED ? kyc.status : KYCStatus.PENDING,
       });
+      return this.kycRepository.save(kyc);
     }
 
+    const newKyc = this.kycRepository.create({
+      ...createKycDto,
+      userId,
+      status: KYCStatus.PENDING,
+    });
+    return this.kycRepository.save(newKyc);
+  }
+
+  async confirmBankChange(userId: string, code: string): Promise<KYC> {
+    const metadata = await this.otpService.verify(
+      OtpPurpose.BANK_CHANGE,
+      userId,
+      code
+    );
+    const kyc = await this.getKyc(userId);
+
+    Object.assign(kyc, metadata?.pendingChanges, { status: KYCStatus.PENDING });
     return this.kycRepository.save(kyc);
   }
 
@@ -143,5 +193,79 @@ export class UsersService {
       rating: user.ratingAvg,
       role: user.role,
     };
+  }
+
+  async listKycByStatus(status?: KYCStatus): Promise<KYC[]> {
+    return this.kycRepository.find({
+      where: status ? { status } : {},
+      relations: ["user"],
+      order: { createdAt: "ASC" },
+    });
+  }
+
+  async approveKyc(userId: string): Promise<KYC> {
+    const kyc = await this.getKyc(userId);
+    kyc.status = KYCStatus.APPROVED;
+    kyc.verifiedAt = new Date();
+    kyc.rejectionReason = undefined;
+    return this.kycRepository.save(kyc);
+  }
+
+  async rejectKyc(userId: string, reason: string): Promise<KYC> {
+    const kyc = await this.getKyc(userId);
+    kyc.status = KYCStatus.REJECTED;
+    kyc.rejectionReason = reason;
+    return this.kycRepository.save(kyc);
+  }
+
+  async updateLocation(
+    userId: string,
+    latitude: number,
+    longitude: number
+  ): Promise<void> {
+    await this.usersRepository.update(userId, {
+      lastLatitude: latitude,
+      lastLongitude: longitude,
+      lastLocationAt: new Date(),
+    });
+  }
+
+  /**
+   * Haversine distance in raw SQL (no PostGIS) - fine at low-thousands-of-runners
+   * scale. The LEAST/GREATEST clamp guards against acos() returning NaN when
+   * floating-point rounding pushes the cosine sum fractionally above 1.0 at
+   * near-zero distances.
+   */
+  async findNearbyTopRatedRunners(
+    latitude: number,
+    longitude: number,
+    radiusKm = 10,
+    limit = 20
+  ): Promise<User[]> {
+    const distanceExpr = `
+      6371 * acos(
+        LEAST(1, GREATEST(-1,
+          cos(radians(:lat)) * cos(radians("user"."lastLatitude")) *
+          cos(radians("user"."lastLongitude") - radians(:lng)) +
+          sin(radians(:lat)) * sin(radians("user"."lastLatitude"))
+        ))
+      )
+    `;
+
+    return this.usersRepository
+      .createQueryBuilder("user")
+      .addSelect(distanceExpr, "distance_km")
+      .where("user.role IN (:...roles)", {
+        roles: [UserRole.RUNNER, UserRole.BOTH],
+      })
+      .andWhere(
+        'user."lastLatitude" IS NOT NULL AND user."lastLongitude" IS NOT NULL'
+      )
+      .andWhere(`${distanceExpr} <= :radiusKm`)
+      .setParameters({ lat: latitude, lng: longitude, radiusKm })
+      .orderBy("user.ratingAvg", "DESC")
+      .addOrderBy("distance_km", "ASC")
+      .limit(limit)
+      .getMany();
   }
 }

@@ -1,6 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { getRepositoryToken } from "@nestjs/typeorm";
 import { ConfigService } from "@nestjs/config";
+import { EventEmitter2 } from "@nestjs/event-emitter";
 import { DataSource } from "typeorm";
 import { PaymentsService } from "./payments.service";
 import { PaystackService } from "./services/paystack.service";
@@ -16,6 +17,7 @@ describe("PaymentsService", () => {
   let usersRepo: any;
   let kycRepo: any;
   let paystackService: jest.Mocked<PaystackService>;
+  let eventEmitter: jest.Mocked<EventEmitter2>;
 
   const errand = {
     id: "errand-1",
@@ -70,6 +72,7 @@ describe("PaymentsService", () => {
           provide: ConfigService,
           useValue: { get: jest.fn((key: string, fallback?: any) => fallback) },
         },
+        { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         { provide: DataSource, useValue: {} },
       ],
     }).compile();
@@ -80,6 +83,7 @@ describe("PaymentsService", () => {
     usersRepo = module.get(getRepositoryToken(User));
     kycRepo = module.get(getRepositoryToken(KYC));
     paystackService = module.get(PaystackService);
+    eventEmitter = module.get(EventEmitter2);
   });
 
   describe("processPayout", () => {
@@ -217,6 +221,89 @@ describe("PaymentsService", () => {
       const result = await service.processRefund("errand-1");
 
       expect(result.status).toBe(PaymentStatus.PENDING);
+    });
+  });
+
+  describe("initializeBoostPayment", () => {
+    it("throws when the errand does not exist", async () => {
+      errandsRepo.findOne.mockResolvedValue(null);
+
+      await expect(
+        service.initializeBoostPayment(
+          "errand-1",
+          "requester-1",
+          "user@example.com",
+          250000
+        )
+      ).rejects.toThrow("Errand not found");
+    });
+
+    it("creates a PENDING BOOST payment record with a system-determined amount", async () => {
+      errandsRepo.findOne.mockResolvedValue(errand);
+      paystackService.initializePayment = jest.fn().mockResolvedValue({
+        status: true,
+        message: "ok",
+        data: {
+          authorization_url: "https://paystack.test/pay",
+          access_code: "abc",
+          reference: "boost-ref",
+        },
+      });
+
+      const result = await service.initializeBoostPayment(
+        "errand-1",
+        "requester-1",
+        "user@example.com",
+        250000
+      );
+
+      expect(paymentsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: PaymentType.BOOST,
+          amount: 250000,
+          status: PaymentStatus.PENDING,
+        })
+      );
+      expect(result.authorizationUrl).toBe("https://paystack.test/pay");
+    });
+  });
+
+  describe("handleWebhook", () => {
+    it("emits payment.boost.succeeded only for BOOST-type payments", async () => {
+      paymentsRepo.findOne.mockResolvedValue({
+        id: "payment-1",
+        errandId: "errand-1",
+        type: PaymentType.BOOST,
+        status: PaymentStatus.PENDING,
+      });
+
+      await service.handleWebhook({
+        event: "charge.success",
+        data: { reference: "boost-ref" },
+      });
+
+      expect(eventEmitter.emit).toHaveBeenCalledWith(
+        "payment.boost.succeeded",
+        {
+          errandId: "errand-1",
+        }
+      );
+    });
+
+    it("does not emit the boost event for non-BOOST payments", async () => {
+      paymentsRepo.findOne.mockResolvedValue({
+        id: "payment-1",
+        errandId: "errand-1",
+        type: PaymentType.ESCROW,
+        status: PaymentStatus.PENDING,
+      });
+
+      await service.handleWebhook({
+        event: "charge.success",
+        data: { reference: "escrow-ref" },
+      });
+
+      expect(eventEmitter.emit).not.toHaveBeenCalled();
     });
   });
 });

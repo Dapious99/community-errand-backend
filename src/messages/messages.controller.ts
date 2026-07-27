@@ -27,6 +27,14 @@ export class MessagesController {
     return this.messagesService.findByErrand(errandId, req.user.id);
   }
 
+  @Get(":errandId/smart-replies")
+  @ApiOperation({
+    summary: "AI-suggested quick replies based on recent conversation",
+  })
+  async smartReplies(@Param("errandId") errandId: string, @Request() req) {
+    return this.messagesService.getSmartReplies(errandId, req.user.id);
+  }
+
   @Post(":errandId")
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: "Send a message" })

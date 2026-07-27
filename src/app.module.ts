@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
+import { EventEmitterModule } from "@nestjs/event-emitter";
 import { getDatabaseConfig } from "./config/database.config";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
@@ -11,6 +12,11 @@ import { MessagesModule } from "./messages/messages.module";
 import { RatingsModule } from "./ratings/ratings.module";
 import { PaymentsModule } from "./payments/payments.module";
 import { UploadsModule } from "./uploads/uploads.module";
+import { RedisModule } from "./common/redis/redis.module";
+import { SettingsModule } from "./settings/settings.module";
+import { AdminModule } from "./admin/admin.module";
+import { NotificationsModule } from "./notifications/notifications.module";
+import { AiModule } from "./ai/ai.module";
 
 @Module({
   imports: [
@@ -18,11 +24,14 @@ import { UploadsModule } from "./uploads/uploads.module";
       isGlobal: true,
       envFilePath: ".env",
     }),
+    EventEmitterModule.forRoot(),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: getDatabaseConfig,
       inject: [ConfigService],
     }),
+    RedisModule,
+    SettingsModule,
     AuthModule,
     UsersModule,
     ErrandsModule,
@@ -30,6 +39,9 @@ import { UploadsModule } from "./uploads/uploads.module";
     RatingsModule,
     PaymentsModule,
     UploadsModule,
+    AdminModule,
+    NotificationsModule,
+    AiModule,
   ],
   controllers: [AppController],
   providers: [AppService],

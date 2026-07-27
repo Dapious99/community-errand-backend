@@ -6,11 +6,15 @@ import { Errand } from "./entities/errand.entity";
 import { Location } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
 import { PaymentsModule } from "../payments/payments.module";
+import { AiModule } from "../ai/ai.module";
+import { NotificationsModule } from "../notifications/notifications.module";
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Errand, Location, MediaAttachment]),
     PaymentsModule,
+    AiModule,
+    NotificationsModule,
   ],
   controllers: [ErrandsController],
   providers: [ErrandsService],

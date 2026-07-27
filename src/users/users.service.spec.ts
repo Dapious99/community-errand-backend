@@ -1,0 +1,137 @@
+import { Test, TestingModule } from "@nestjs/testing";
+import { getRepositoryToken } from "@nestjs/typeorm";
+import { UsersService } from "./users.service";
+import { User } from "./entities/user.entity";
+import { KYC, KYCStatus } from "./entities/kyc.entity";
+import { RatingsService } from "../ratings/ratings.service";
+import { OtpService } from "../otp/otp.service";
+
+describe("UsersService", () => {
+  let service: UsersService;
+  let kycRepo: any;
+  let otpService: jest.Mocked<OtpService>;
+
+  const user = { id: "user-1", email: "user@example.com" };
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        UsersService,
+        {
+          provide: getRepositoryToken(User),
+          useValue: { findOne: jest.fn().mockResolvedValue(user) },
+        },
+        {
+          provide: getRepositoryToken(KYC),
+          useValue: {
+            findOne: jest.fn(),
+            create: jest.fn((data) => data),
+            save: jest.fn((data) => Promise.resolve({ id: "kyc-1", ...data })),
+          },
+        },
+        { provide: RatingsService, useValue: {} },
+        {
+          provide: OtpService,
+          useValue: {
+            request: jest.fn().mockResolvedValue(undefined),
+            verify: jest.fn(),
+          },
+        },
+      ],
+    }).compile();
+
+    service = module.get(UsersService);
+    kycRepo = module.get(getRepositoryToken(KYC));
+    otpService = module.get(OtpService);
+  });
+
+  describe("submitKyc", () => {
+    it("creates a fresh PENDING KYC record when none exists yet", async () => {
+      kycRepo.findOne.mockResolvedValue(null);
+
+      const result: any = await service.submitKyc(user.id, {
+        bankAccountNumber: "0123456789",
+        bankName: "Access Bank",
+      });
+
+      expect(result.status).toBe(KYCStatus.PENDING);
+      expect(otpService.request).not.toHaveBeenCalled();
+    });
+
+    it("re-submitting a REJECTED KYC applies changes directly and resets to PENDING", async () => {
+      kycRepo.findOne.mockResolvedValue({
+        userId: user.id,
+        status: KYCStatus.REJECTED,
+        bankAccountNumber: "111",
+        bankName: "Old Bank",
+      });
+
+      const result: any = await service.submitKyc(user.id, {
+        bankAccountNumber: "222",
+        bankName: "New Bank",
+      });
+
+      expect(result.status).toBe(KYCStatus.PENDING);
+      expect(result.bankAccountNumber).toBe("222");
+      expect(otpService.request).not.toHaveBeenCalled();
+    });
+
+    it("requires OTP confirmation instead of applying a bank change on an APPROVED KYC", async () => {
+      kycRepo.findOne.mockResolvedValue({
+        userId: user.id,
+        status: KYCStatus.APPROVED,
+        bankAccountNumber: "111",
+        bankName: "Old Bank",
+      });
+
+      const result: any = await service.submitKyc(user.id, {
+        bankAccountNumber: "999",
+        bankName: "Old Bank",
+      });
+
+      expect(result.requiresConfirmation).toBe(true);
+      expect(otpService.request).toHaveBeenCalledWith(
+        "bank_change",
+        user.id,
+        user.email,
+        expect.objectContaining({ pendingChanges: expect.any(Object) })
+      );
+      expect(kycRepo.save).not.toHaveBeenCalled();
+    });
+
+    it("applies a non-bank edit to an APPROVED KYC directly, keeping it APPROVED", async () => {
+      kycRepo.findOne.mockResolvedValue({
+        userId: user.id,
+        status: KYCStatus.APPROVED,
+        bankAccountNumber: "111",
+        bankName: "Old Bank",
+      });
+
+      const result: any = await service.submitKyc(user.id, {
+        idCardUrl: "https://example.com/new-id.jpg",
+      });
+
+      expect(result.status).toBe(KYCStatus.APPROVED);
+      expect(otpService.request).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("confirmBankChange", () => {
+    it("applies the pending changes and resets status to PENDING", async () => {
+      otpService.verify.mockResolvedValue({
+        pendingChanges: { bankAccountNumber: "999", bankName: "New Bank" },
+      });
+      kycRepo.findOne.mockResolvedValue({
+        userId: user.id,
+        status: KYCStatus.APPROVED,
+        bankAccountNumber: "111",
+        bankName: "Old Bank",
+      });
+
+      const result = await service.confirmBankChange(user.id, "123456");
+
+      expect(result.bankAccountNumber).toBe("999");
+      expect(result.status).toBe(KYCStatus.PENDING);
+    });
+  });
+});

@@ -4,17 +4,22 @@ import {
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  ConflictException,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
+import { OnEvent } from "@nestjs/event-emitter";
 import { Errand, ErrandStatus } from "./entities/errand.entity";
-import { Location } from "./entities/location.entity";
+import { Location, LocationType } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
 import { CreateErrandDto } from "./dto/create-errand.dto";
 import { UpdateErrandStatusDto } from "./dto/update-errand-status.dto";
 import { FilterErrandsDto } from "./dto/filter-errands.dto";
 import { UserRole } from "../users/entities/user.entity";
 import { PaymentsService } from "../payments/payments.service";
+import { SettingsService } from "../settings/settings.service";
+import { AiService } from "../ai/ai.service";
+import { NotificationsService } from "../notifications/notifications.service";
 
 @Injectable()
 export class ErrandsService {
@@ -27,14 +32,21 @@ export class ErrandsService {
     private locationsRepository: Repository<Location>,
     @InjectRepository(MediaAttachment)
     private mediaAttachmentsRepository: Repository<MediaAttachment>,
-    private paymentsService: PaymentsService
+    private paymentsService: PaymentsService,
+    private settingsService: SettingsService,
+    private aiService: AiService,
+    private notificationsService: NotificationsService
   ) {}
 
   async create(
     createErrandDto: CreateErrandDto,
-    userId: string
-  ): Promise<Errand> {
-    const { locations, mediaAttachments, ...errandData } = createErrandDto;
+    userId: string,
+    userEmail: string
+  ): Promise<
+    Errand & { boostPayment?: { authorizationUrl: string; reference: string } }
+  > {
+    const { locations, mediaAttachments, isBoosted, ...errandData } =
+      createErrandDto;
 
     const errand = this.errandsRepository.create({
       ...errandData,
@@ -66,7 +78,85 @@ export class ErrandsService {
       await this.mediaAttachmentsRepository.save(mediaEntities);
     }
 
-    return this.findOne(savedErrand.id);
+    const result: Errand & {
+      boostPayment?: { authorizationUrl: string; reference: string };
+    } = await this.findOne(savedErrand.id);
+
+    if (isBoosted) {
+      try {
+        const boostPrice = await this.settingsService.get<number>(
+          "ai_boost_price_ngn",
+          250000
+        );
+        const boostPayment = await this.paymentsService.initializeBoostPayment(
+          savedErrand.id,
+          userId,
+          userEmail,
+          boostPrice
+        );
+        result.boostPayment = {
+          authorizationUrl: boostPayment.authorizationUrl,
+          reference: boostPayment.reference,
+        };
+      } catch (error: any) {
+        this.logger.error(
+          `Failed to initialize boost payment for errand ${savedErrand.id}: ${error.message}`
+        );
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * The AI-Boost's actual effects (title rewrite, isBoosted flag, runner
+   * notifications) only activate once Paystack confirms the charge
+   * succeeded - not the moment checkout is initialized in `create()` above -
+   * so a user can't get the paid perks without completing payment.
+   */
+  @OnEvent("payment.boost.succeeded")
+  async handleBoostPaymentSucceeded({
+    errandId,
+  }: {
+    errandId: string;
+  }): Promise<void> {
+    await this.errandsRepository.update(errandId, {
+      isBoosted: true,
+      boostedAt: new Date(),
+    });
+
+    try {
+      const errand = await this.findOne(errandId);
+      const boostedTitle = await this.aiService.rewriteBoostTitle(
+        errand.title,
+        errand.description
+      );
+      await this.errandsRepository.update(errandId, { title: boostedTitle });
+    } catch (error: any) {
+      this.logger.warn(
+        `AI title rewrite failed for boosted errand ${errandId}: ${error.message}`
+      );
+    }
+
+    try {
+      const errand = await this.findOne(errandId);
+      const pickup = errand.locations?.find(
+        (l) => l.type === LocationType.PICKUP
+      );
+      if (pickup?.latitude != null && pickup?.longitude != null) {
+        await this.notificationsService.notifyNearbyTopRatedRunners({
+          latitude: pickup.latitude,
+          longitude: pickup.longitude,
+          title: "New boosted errand nearby!",
+          body: errand.title,
+          data: { errandId },
+        });
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `Boost notification fan-out failed for errand ${errandId}: ${error.message}`
+      );
+    }
   }
 
   async findAll(
@@ -193,11 +283,29 @@ export class ErrandsService {
       throw new ForbiddenException("Only runners can accept errands");
     }
 
-    errand.status = ErrandStatus.ACCEPTED;
-    errand.runnerId = userId;
-    errand.etaMinutes = 40; // Default ETA
+    // Atomic, conditional on the DB row still being OPEN: if two runners hit
+    // this at the same time, only the first UPDATE's WHERE clause matches -
+    // the second sees 0 affected rows instead of silently overwriting the
+    // first runner's acceptance. This is what actually prevents the race,
+    // not a periodic job (which could only detect the collision after the
+    // fact, once both requests already believed they'd succeeded).
+    const result = await this.errandsRepository
+      .createQueryBuilder()
+      .update(Errand)
+      .set({ status: ErrandStatus.ACCEPTED, runnerId: userId, etaMinutes: 40 })
+      .where("id = :id AND status = :openStatus", {
+        id,
+        openStatus: ErrandStatus.OPEN,
+      })
+      .execute();
 
-    return this.errandsRepository.save(errand);
+    if (result.affected === 0) {
+      throw new ConflictException(
+        "This errand was just accepted by someone else."
+      );
+    }
+
+    return this.findOne(id);
   }
 
   async updateStatus(

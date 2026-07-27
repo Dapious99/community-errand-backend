@@ -8,6 +8,7 @@ import { Repository } from "typeorm";
 import { Message } from "./entities/message.entity";
 import { Errand } from "../errands/entities/errand.entity";
 import { CreateMessageDto } from "./dto/create-message.dto";
+import { AiService } from "../ai/ai.service";
 
 @Injectable()
 export class MessagesService {
@@ -15,7 +16,8 @@ export class MessagesService {
     @InjectRepository(Message)
     private messagesRepository: Repository<Message>,
     @InjectRepository(Errand)
-    private errandsRepository: Repository<Errand>
+    private errandsRepository: Repository<Errand>,
+    private aiService: AiService
   ) {}
 
   async create(
@@ -53,6 +55,23 @@ export class MessagesService {
       relations: ["fromUser"],
       order: { createdAt: "ASC" },
     });
+  }
+
+  /** Feature D (AI Smart Replies): up to 3 quick-reply suggestions from recent context. */
+  async getSmartReplies(errandId: string, userId: string): Promise<string[]> {
+    await this.verifyParticipant(errandId, userId);
+
+    const recentMessages = await this.messagesRepository.find({
+      where: { errandId },
+      order: { createdAt: "DESC" },
+      take: 10,
+    });
+
+    return this.aiService.generateSmartReplies(
+      recentMessages
+        .reverse()
+        .map((m) => ({ fromUserId: m.fromUserId, text: m.text }))
+    );
   }
 
   async verifyParticipant(errandId: string, userId: string): Promise<void> {

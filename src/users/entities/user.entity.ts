@@ -62,6 +62,25 @@ export class User {
   @Column({ nullable: true })
   avatarUrl?: string;
 
+  @Column("decimal", {
+    precision: 10,
+    scale: 8,
+    nullable: true,
+    transformer: new DecimalColumnTransformer(),
+  })
+  lastLatitude?: number;
+
+  @Column("decimal", {
+    precision: 11,
+    scale: 8,
+    nullable: true,
+    transformer: new DecimalColumnTransformer(),
+  })
+  lastLongitude?: number;
+
+  @Column({ type: "timestamp", nullable: true })
+  lastLocationAt?: Date;
+
   @CreateDateColumn()
   createdAt: Date;
 

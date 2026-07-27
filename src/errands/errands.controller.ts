@@ -17,20 +17,45 @@ import { ErrandsService } from "./errands.service";
 import { CreateErrandDto } from "./dto/create-errand.dto";
 import { UpdateErrandStatusDto } from "./dto/update-errand-status.dto";
 import { FilterErrandsDto } from "./dto/filter-errands.dto";
+import { MagicPostDto } from "./dto/magic-post.dto";
+import { PriceEstimateDto } from "./dto/price-estimate.dto";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import { AiService } from "../ai/ai.service";
 
 @ApiTags("errands")
 @Controller("errands")
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class ErrandsController {
-  constructor(private readonly errandsService: ErrandsService) {}
+  constructor(
+    private readonly errandsService: ErrandsService,
+    private readonly aiService: AiService
+  ) {}
 
   @Post()
   @HttpCode(HttpStatus.CREATED)
   @ApiOperation({ summary: "Create a new errand" })
   async create(@Body() createErrandDto: CreateErrandDto, @Request() req) {
-    return this.errandsService.create(createErrandDto, req.user.id);
+    return this.errandsService.create(
+      createErrandDto,
+      req.user.id,
+      req.user.email
+    );
+  }
+
+  @Post("ai/magic-post")
+  @ApiOperation({
+    summary:
+      "AI Magic Post: extract a draft errand from free-form text (does not create it)",
+  })
+  async magicPost(@Body() magicPostDto: MagicPostDto) {
+    return this.aiService.parseErrandFromText(magicPostDto.text);
+  }
+
+  @Post("ai/price-estimate")
+  @ApiOperation({ summary: "AI market-rate price estimate for an errand" })
+  async priceEstimate(@Body() priceEstimateDto: PriceEstimateDto) {
+    return this.aiService.estimatePriceRange(priceEstimateDto);
   }
 
   @Get()

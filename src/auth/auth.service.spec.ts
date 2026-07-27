@@ -1,16 +1,21 @@
 import { Test, TestingModule } from "@nestjs/testing";
-import { UnauthorizedException } from "@nestjs/common";
+import { getRepositoryToken } from "@nestjs/typeorm";
+import { BadRequestException, UnauthorizedException } from "@nestjs/common";
 import { JwtService } from "@nestjs/jwt";
 import { ConfigService } from "@nestjs/config";
 import * as bcrypt from "bcrypt";
 import { AuthService } from "./auth.service";
 import { UsersService } from "../users/users.service";
 import { UserRole } from "../users/entities/user.entity";
+import { OtpService } from "../otp/otp.service";
+import { TrustedDevice } from "./entities/trusted-device.entity";
 
 describe("AuthService", () => {
   let authService: AuthService;
   let usersService: jest.Mocked<UsersService>;
   let jwtService: jest.Mocked<JwtService>;
+  let otpService: jest.Mocked<OtpService>;
+  let trustedDevicesRepo: any;
 
   const mockUser = {
     id: "user-1",
@@ -33,6 +38,8 @@ describe("AuthService", () => {
             create: jest.fn(),
             findByEmail: jest.fn(),
             findOne: jest.fn(),
+            setVerified: jest.fn(),
+            setPassword: jest.fn(),
           },
         },
         {
@@ -48,16 +55,33 @@ describe("AuthService", () => {
             get: jest.fn((key: string, fallback?: any) => fallback),
           },
         },
+        {
+          provide: OtpService,
+          useValue: {
+            request: jest.fn().mockResolvedValue(undefined),
+            verify: jest.fn(),
+          },
+        },
+        {
+          provide: getRepositoryToken(TrustedDevice),
+          useValue: {
+            findOne: jest.fn(),
+            create: jest.fn((data) => data),
+            save: jest.fn((data) => Promise.resolve(data)),
+          },
+        },
       ],
     }).compile();
 
     authService = module.get(AuthService);
     usersService = module.get(UsersService);
     jwtService = module.get(JwtService);
+    otpService = module.get(OtpService);
+    trustedDevicesRepo = module.get(getRepositoryToken(TrustedDevice));
   });
 
   describe("register", () => {
-    it("creates the user and returns tokens alongside a safe user payload", async () => {
+    it("creates the user, sends a verification email, and returns tokens", async () => {
       usersService.create.mockResolvedValue(mockUser as any);
 
       const result = await authService.register({
@@ -71,9 +95,40 @@ describe("AuthService", () => {
         email: mockUser.email,
         name: mockUser.name,
         role: mockUser.role,
+        verified: mockUser.verified,
       });
       expect(result.accessToken).toBe("signed-token");
-      expect(result.refreshToken).toBe("signed-token");
+      expect(otpService.request).toHaveBeenCalled();
+      expect(trustedDevicesRepo.save).not.toHaveBeenCalled();
+    });
+
+    it("trusts the device immediately when a deviceId is provided at signup", async () => {
+      usersService.create.mockResolvedValue(mockUser as any);
+      trustedDevicesRepo.findOne.mockResolvedValue(null);
+
+      await authService.register({
+        email: mockUser.email,
+        name: mockUser.name,
+        password: "password123",
+        deviceId: "device-abc",
+      } as any);
+
+      expect(trustedDevicesRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: mockUser.id, deviceId: "device-abc" })
+      );
+    });
+
+    it("does not fail registration if the verification email fails to send", async () => {
+      usersService.create.mockResolvedValue(mockUser as any);
+      otpService.request.mockRejectedValue(new Error("resend down"));
+
+      const result = await authService.register({
+        email: mockUser.email,
+        name: mockUser.name,
+        password: "password123",
+      } as any);
+
+      expect(result.accessToken).toBe("signed-token");
     });
   });
 
@@ -85,7 +140,7 @@ describe("AuthService", () => {
         authService.login({
           email: "nope@example.com",
           password: "password123",
-        })
+        } as any)
       ).rejects.toThrow(UnauthorizedException);
     });
 
@@ -97,11 +152,14 @@ describe("AuthService", () => {
       } as any);
 
       await expect(
-        authService.login({ email: mockUser.email, password: "wrong-password" })
+        authService.login({
+          email: mockUser.email,
+          password: "wrong-password",
+        } as any)
       ).rejects.toThrow(UnauthorizedException);
     });
 
-    it("returns tokens on valid credentials", async () => {
+    it("requires device verification when no deviceId is sent", async () => {
       const hash = await bcrypt.hash("correct-password", 10);
       usersService.findByEmail.mockResolvedValue({
         ...mockUser,
@@ -111,10 +169,152 @@ describe("AuthService", () => {
       const result = await authService.login({
         email: mockUser.email,
         password: "correct-password",
+      } as any);
+
+      expect(result).toEqual({
+        requiresDeviceVerification: true,
+        message: expect.any(String),
+      });
+      expect(otpService.request).toHaveBeenCalled();
+    });
+
+    it("requires device verification when the deviceId is not recognized", async () => {
+      const hash = await bcrypt.hash("correct-password", 10);
+      usersService.findByEmail.mockResolvedValue({
+        ...mockUser,
+        passwordHash: hash,
+      } as any);
+      trustedDevicesRepo.findOne.mockResolvedValue(null);
+
+      const result = await authService.login({
+        email: mockUser.email,
+        password: "correct-password",
+        deviceId: "unknown-device",
+      } as any);
+
+      expect(result.requiresDeviceVerification).toBe(true);
+    });
+
+    it("logs in directly when the device is already trusted", async () => {
+      const hash = await bcrypt.hash("correct-password", 10);
+      usersService.findByEmail.mockResolvedValue({
+        ...mockUser,
+        passwordHash: hash,
+      } as any);
+      trustedDevicesRepo.findOne.mockResolvedValue({
+        userId: mockUser.id,
+        deviceId: "known-device",
       });
 
+      const result: any = await authService.login({
+        email: mockUser.email,
+        password: "correct-password",
+        deviceId: "known-device",
+      } as any);
+
       expect(result.accessToken).toBe("signed-token");
-      expect(result.user.email).toBe(mockUser.email);
+      expect(otpService.request).not.toHaveBeenCalled();
+      expect(trustedDevicesRepo.save).toHaveBeenCalled();
+    });
+  });
+
+  describe("confirmDevice", () => {
+    it("throws for an unknown email without revealing that it's unknown", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        authService.confirmDevice({
+          email: "nope@example.com",
+          deviceId: "d1",
+          code: "123456",
+        })
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it("trusts the device and returns tokens on a valid code", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+      trustedDevicesRepo.findOne.mockResolvedValue(null);
+
+      const result = await authService.confirmDevice({
+        email: mockUser.email,
+        deviceId: "device-abc",
+        code: "123456",
+      });
+
+      expect(otpService.verify).toHaveBeenCalled();
+      expect(trustedDevicesRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ userId: mockUser.id, deviceId: "device-abc" })
+      );
+      expect(result.accessToken).toBe("signed-token");
+    });
+  });
+
+  describe("verifyEmail / resendVerification", () => {
+    it("marks the user verified on a correct code", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+
+      await authService.verifyEmail({ email: mockUser.email, code: "123456" });
+
+      expect(usersService.setVerified).toHaveBeenCalledWith(mockUser.id);
+    });
+
+    it("throws for an unknown email", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+
+      await expect(
+        authService.verifyEmail({ email: "nope@example.com", code: "123456" })
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("resend gives the same response whether or not the account needs verification", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+      const forUnknown = await authService.resendVerification({
+        email: "nope@example.com",
+      });
+
+      usersService.findByEmail.mockResolvedValue({
+        ...mockUser,
+        verified: true,
+      } as any);
+      const forVerified = await authService.resendVerification({
+        email: mockUser.email,
+      });
+
+      expect(forUnknown).toEqual(forVerified);
+      expect(otpService.request).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("forgotPassword / resetPassword", () => {
+    it("gives the same response whether or not the account exists", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+      const forUnknown = await authService.forgotPassword({
+        email: "nope@example.com",
+      });
+
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+      const forKnown = await authService.forgotPassword({
+        email: mockUser.email,
+      });
+
+      expect(forUnknown).toEqual(forKnown);
+      expect(otpService.request).toHaveBeenCalledTimes(1);
+    });
+
+    it("resets the password on a valid code", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+
+      await authService.resetPassword({
+        email: mockUser.email,
+        code: "123456",
+        newPassword: "newPassword123",
+      });
+
+      expect(otpService.verify).toHaveBeenCalled();
+      expect(usersService.setPassword).toHaveBeenCalledWith(
+        mockUser.id,
+        expect.any(String)
+      );
     });
   });
 

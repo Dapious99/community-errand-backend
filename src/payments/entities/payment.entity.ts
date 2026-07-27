@@ -16,6 +16,7 @@ export enum PaymentType {
   ESCROW = "escrow",
   PAYOUT = "payout",
   REFUND = "refund",
+  BOOST = "boost",
 }
 
 export enum PaymentStatus {

@@ -1,6 +1,14 @@
 # compiled output
 /dist
 /node_modules
+# Stray compiled artifacts sometimes emitted next to source by editor
+# tooling outside of /dist - never intentional, safe to ignore/delete.
+test/**/*.js
+test/**/*.js.map
+test/**/*.d.ts
+migrations/**/*.js
+migrations/**/*.js.map
+migrations/**/*.d.ts
 
 # Logs
 logs
@@ -33,6 +41,8 @@ lerna-debug.log*
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
+.claude
+.kiro
 
 # Environment variables
 .env

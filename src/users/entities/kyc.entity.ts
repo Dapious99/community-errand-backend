@@ -48,6 +48,9 @@ export class KYC {
   @Column({ nullable: true })
   verifiedAt?: Date;
 
+  @Column("text", { nullable: true })
+  rejectionReason?: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

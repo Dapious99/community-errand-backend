@@ -5,9 +5,10 @@ import { UsersController } from "./users.controller";
 import { User } from "./entities/user.entity";
 import { KYC } from "./entities/kyc.entity";
 import { RatingsModule } from "../ratings/ratings.module";
+import { OtpModule } from "../otp/otp.module";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, KYC]), RatingsModule],
+  imports: [TypeOrmModule.forFeature([User, KYC]), RatingsModule, OtpModule],
   controllers: [UsersController],
   providers: [UsersService],
   exports: [UsersService],
