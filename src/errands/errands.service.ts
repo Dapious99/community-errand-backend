@@ -20,6 +20,8 @@ import { PaymentsService } from "../payments/payments.service";
 import { SettingsService } from "../settings/settings.service";
 import { AiService } from "../ai/ai.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { WalletService } from "../wallet/wallet.service";
+import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
 
 @Injectable()
 export class ErrandsService {
@@ -35,7 +37,8 @@ export class ErrandsService {
     private paymentsService: PaymentsService,
     private settingsService: SettingsService,
     private aiService: AiService,
-    private notificationsService: NotificationsService
+    private notificationsService: NotificationsService,
+    private walletService: WalletService
   ) {}
 
   async create(
@@ -48,34 +51,58 @@ export class ErrandsService {
     const { locations, mediaAttachments, isBoosted, ...errandData } =
       createErrandDto;
 
-    const errand = this.errandsRepository.create({
-      ...errandData,
-      requesterId: userId,
-      status: ErrandStatus.OPEN,
-    });
+    // Debit the requester's wallet before creating anything - if they can't
+    // afford it, nothing gets created at all. There's no errand row yet at
+    // this point, so the transaction is linked to it afterward.
+    const paymentTransaction = await this.walletService.debit(
+      userId,
+      errandData.price,
+      WalletTransactionType.ERRAND_PAYMENT,
+      { description: `Payment for errand "${errandData.title}"` }
+    );
 
-    const savedErrand = await this.errandsRepository.save(errand);
+    let savedErrand: Errand;
+    try {
+      const errand = this.errandsRepository.create({
+        ...errandData,
+        requesterId: userId,
+        status: ErrandStatus.OPEN,
+      });
 
-    // Save locations
-    if (locations && locations.length > 0) {
-      const locationEntities = locations.map((loc) =>
-        this.locationsRepository.create({
-          ...loc,
-          errandId: savedErrand.id,
-        })
+      savedErrand = await this.errandsRepository.save(errand);
+
+      // Save locations
+      if (locations && locations.length > 0) {
+        const locationEntities = locations.map((loc) =>
+          this.locationsRepository.create({
+            ...loc,
+            errandId: savedErrand.id,
+          })
+        );
+        await this.locationsRepository.save(locationEntities);
+      }
+
+      // Save media attachments
+      if (mediaAttachments && mediaAttachments.length > 0) {
+        const mediaEntities = mediaAttachments.map((media) =>
+          this.mediaAttachmentsRepository.create({
+            ...media,
+            errandId: savedErrand.id,
+          })
+        );
+        await this.mediaAttachmentsRepository.save(mediaEntities);
+      }
+
+      await this.walletService.linkTransactionToErrand(
+        paymentTransaction.id,
+        savedErrand.id
       );
-      await this.locationsRepository.save(locationEntities);
-    }
-
-    // Save media attachments
-    if (mediaAttachments && mediaAttachments.length > 0) {
-      const mediaEntities = mediaAttachments.map((media) =>
-        this.mediaAttachmentsRepository.create({
-          ...media,
-          errandId: savedErrand.id,
-        })
+    } catch (error: any) {
+      await this.walletService.reverseTransaction(
+        paymentTransaction.id,
+        "Errand creation failed after payment"
       );
-      await this.mediaAttachmentsRepository.save(mediaEntities);
+      throw error;
     }
 
     const result: Errand & {
@@ -86,7 +113,7 @@ export class ErrandsService {
       try {
         const boostPrice = await this.settingsService.get<number>(
           "ai_boost_price_ngn",
-          250000
+          2500
         );
         const boostPayment = await this.paymentsService.initializeBoostPayment(
           savedErrand.id,
@@ -348,6 +375,12 @@ export class ErrandsService {
     return savedErrand;
   }
 
+  /**
+   * Only possible before a runner has picked up the errand - once accepted,
+   * the requester can no longer cancel through this endpoint (there's no
+   * dispute/"runner default" resolution flow in this codebase yet; that
+   * needs a separate admin/support path).
+   */
   async cancel(id: string, userId: string): Promise<void> {
     const errand = await this.findOne(id);
 
@@ -355,8 +388,10 @@ export class ErrandsService {
       throw new ForbiddenException("Only the requester can cancel this errand");
     }
 
-    if (errand.status === ErrandStatus.COMPLETED) {
-      throw new BadRequestException("Cannot cancel a completed errand");
+    if (errand.status !== ErrandStatus.OPEN) {
+      throw new BadRequestException(
+        "This errand has already been picked up by a runner and can no longer be cancelled. Contact support if the runner failed to complete it."
+      );
     }
 
     errand.status = ErrandStatus.CANCELLED;

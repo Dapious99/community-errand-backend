@@ -8,6 +8,7 @@ import { AuthService } from "./auth.service";
 import { UsersService } from "../users/users.service";
 import { UserRole } from "../users/entities/user.entity";
 import { OtpService } from "../otp/otp.service";
+import { OtpPurpose } from "../otp/otp-purpose.enum";
 import { TrustedDevice } from "./entities/trusted-device.entity";
 
 describe("AuthService", () => {
@@ -60,6 +61,7 @@ describe("AuthService", () => {
           useValue: {
             request: jest.fn().mockResolvedValue(undefined),
             verify: jest.fn(),
+            resend: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -246,6 +248,38 @@ describe("AuthService", () => {
         expect.objectContaining({ userId: mockUser.id, deviceId: "device-abc" })
       );
       expect(result.accessToken).toBe("signed-token");
+    });
+  });
+
+  describe("resendDeviceLoginCode", () => {
+    it("gives the same generic response whether or not the account/device has a pending confirmation", async () => {
+      usersService.findByEmail.mockResolvedValue(null);
+      const forUnknown = await authService.resendDeviceLoginCode(
+        "nope@example.com",
+        "device-1"
+      );
+
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+      otpService.resend.mockRejectedValue(new Error("nothing pending"));
+      const forNoPending = await authService.resendDeviceLoginCode(
+        mockUser.email,
+        "device-1"
+      );
+
+      expect(forUnknown).toEqual(forNoPending);
+    });
+
+    it("resends via the OTP service when a confirmation is pending", async () => {
+      usersService.findByEmail.mockResolvedValue(mockUser as any);
+      otpService.resend.mockResolvedValue(undefined);
+
+      await authService.resendDeviceLoginCode(mockUser.email, "device-1");
+
+      expect(otpService.resend).toHaveBeenCalledWith(
+        OtpPurpose.NEW_DEVICE_LOGIN,
+        `${mockUser.id}:device-1`,
+        mockUser.email
+      );
     });
   });
 

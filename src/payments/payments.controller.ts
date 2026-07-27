@@ -14,7 +14,7 @@ import {
 } from "@nestjs/common";
 import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
 import { PaymentsService } from "./payments.service";
-import { InitializePaymentDto } from "./dto/initialize-payment.dto";
+import { DepositDto } from "./dto/deposit.dto";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import * as crypto from "crypto";
 import { ConfigService } from "@nestjs/config";
@@ -32,14 +32,14 @@ export class PaymentsController {
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: "Initialize payment for an errand" })
-  async initialize(
-    @Body() initializePaymentDto: InitializePaymentDto,
-    @Request() req
-  ) {
-    return this.paymentsService.initializePayment(
-      initializePaymentDto,
-      req.user.id
+  @ApiOperation({
+    summary: "Initialize a wallet deposit (top-up) via Paystack",
+  })
+  async initialize(@Body() depositDto: DepositDto, @Request() req) {
+    return this.paymentsService.initializeDeposit(
+      req.user.id,
+      req.user.email,
+      depositDto.amount
     );
   }
 
@@ -89,5 +89,17 @@ export class PaymentsController {
   @ApiOperation({ summary: "Get user payouts" })
   async getPayouts(@Request() req) {
     return this.paymentsService.getPayouts(req.user.id);
+  }
+
+  @Post("withdraw")
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Withdraw the entire wallet balance to your bank account (minus the platform withdrawal fee)",
+  })
+  async withdraw(@Request() req) {
+    return this.paymentsService.initiateWithdrawal(req.user.id);
   }
 }

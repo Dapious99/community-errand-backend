@@ -12,9 +12,10 @@ correctly. See [README.md](./README.md) for the full endpoint reference and
 | [Supabase](https://supabase.com) | Postgres database | **Yes** | Yes |
 | [Upstash](https://upstash.com) | Redis (OTP codes only) | No - app boots without it, but every OTP flow (signup verification, password reset, new-device login, bank-change confirm) fails until it's set | Yes |
 | [Resend](https://resend.com) | Sends OTP emails | No - same as above | Yes (100 emails/day) |
-| [Paystack](https://paystack.com) | Payments (escrow/payout/refund/AI-boost) | No - test keys work, real payment/payout calls fail without real keys | Yes (test mode) |
+| [Paystack](https://paystack.com) | Payments (wallet deposit/top-up, AI-boost, wallet withdrawal transfers) | No - test keys work, real deposit/withdrawal calls fail without real keys | Yes (test mode) |
 | [Cloudinary](https://cloudinary.com) | Image/document uploads | No - only `/uploads/*` endpoints need it | Yes |
 | [Anthropic](https://console.anthropic.com) | AI features (Magic Post, price estimates, boost title rewrite, smart replies) | No - only `/errands/ai/*`, boost title rewrite, and `/messages/:id/smart-replies` need it | Yes (pay-as-you-go, no free tier, but Haiku is cheap) |
+| [VTpass](https://vtpass.com) | Airtime/data bill purchases from wallet balance | No - only `/bills/*` need it | Yes (sandbox.vtpass.com for testing) |
 
 **You already have Supabase set up** (`DB_HOST` in `.env` points at your
 project's connection pooler). The other five are only needed once you
@@ -37,6 +38,10 @@ it just returns a clear error from the specific endpoints that need them.
 - **Cloudinary**: Dashboard home page shows Cloud Name, API Key, API Secret
   directly.
 - **Anthropic**: console.anthropic.com → API Keys → create one.
+- **VTpass**: Sign up at vtpass.com (or sandbox.vtpass.com to test without
+  real money) → Profile → API Keys tab → set "API AUTHENTICATION TYPE" to
+  "API keys" → copy your static API Key, then generate public/secret keys
+  (**shown only once** - copy them immediately or you'll have to regenerate).
 
 ## 2. Local setup
 
@@ -82,8 +87,8 @@ not just nice-to-haves.
 - Auth header: `Authorization: Bearer <accessToken>` on every request except
   `/auth/register`, `/auth/login`, `/auth/refresh`, `/auth/verify-email`,
   `/auth/resend-verification`, `/auth/forgot-password`,
-  `/auth/reset-password`, `/auth/login/confirm-device`, and
-  `/payments/webhook`.
+  `/auth/reset-password`, `/auth/login/confirm-device`,
+  `/auth/login/resend-device-code`, and `/payments/webhook`.
 
 ### Response envelope
 Every response is wrapped. Design your API client around this shape:
@@ -120,13 +125,18 @@ emailed-code step every single time. See README.md's
 ```
 On the second shape, prompt for the emailed code and call
 `POST /auth/login/confirm-device { email, deviceId, code }`, which returns
-tokens the same way a normal login would.
+tokens the same way a normal login would. If the user needs a fresh code
+(expired, or the email never arrived), call
+`POST /auth/login/resend-device-code { email, deviceId }` - it doesn't
+require the password again.
 
 ### Bank-change confirmation
 `POST /users/kyc` can similarly return
 `{ requiresConfirmation: true, message }` instead of the KYC object, if the
 runner is changing bank details on an already-approved KYC. Prompt for the
-emailed code and call `POST /users/kyc/confirm-bank-change { code }`.
+emailed code and call `POST /users/kyc/confirm-bank-change { code }`. If the
+code expires, `POST /users/kyc/resend-bank-change-code` (no body) issues a
+fresh one without resubmitting the bank details form.
 
 ### WebSocket (messaging)
 Connect to the `/messages` namespace with the JWT access token in the
@@ -155,6 +165,48 @@ something to match against - there's no location tracking without it.
 `isBoosted` flag, runner notifications) only apply once the payment is
 confirmed via webhook, not immediately on request** - so don't expect
 `isBoosted` to be `true` on the errand returned from the initial `POST`.
+
+### Wallet & bills (airtime/data)
+Both requesters and runners have a wallet (`GET /wallet` for balance,
+`GET /wallet/transactions` for history). It's the only place money moves
+through internally now:
+
+- **Funding it**: `POST /payments/initialize { amount }` → redirect to the
+  returned `authorizationUrl` to complete a Paystack checkout. Once Paystack
+  confirms the charge (webhook, or your app calling
+  `POST /payments/verify/:reference` after the redirect back), the wallet
+  balance increases. **This replaced the old per-errand escrow flow** - it
+  no longer takes an `errandId`, just an `amount`.
+- **Posting an errand**: `POST /errands` now debits the wallet for the
+  errand's price *at creation time* - there's no separate "pay for this
+  errand" step anymore. If the balance can't cover it, errand creation fails
+  with a 400 and nothing is created. **Make sure the requester has deposited
+  enough before letting them post an errand**, or handle the 400 by
+  prompting them to top up.
+- **Cancelling**: `DELETE /errands/:id` only works while the errand is still
+  `OPEN` (no runner has accepted yet) - it refunds the wallet debit in full.
+  Once a runner accepts, cancellation is no longer possible through the API
+  at all (contact support for a runner-default/no-show case - there's no
+  automated path for that yet).
+- **Runner payouts**: a completed errand credits the runner's wallet
+  directly (no bank transfer at that point). Withdrawing to a bank account
+  is a separate, explicit action: `POST /payments/withdraw` sweeps the
+  **entire** wallet balance to the runner's bank, minus a platform
+  withdrawal fee (admin-configurable, `withdrawal_fee_percent`, default
+  3.5%). It's rejected with a 400 if the balance is below the configurable
+  minimum (`min_withdrawal_amount_ngn`, default ₦2,000) or if the runner has
+  no approved KYC with bank details on file.
+- **Bills** - below the withdrawal minimum, the wallet balance isn't stuck,
+  it can be spent directly on airtime/data:
+  - `POST /bills/airtime { network, phone, amount }`
+  - `GET /bills/data-plans?network=mtn` → list variation codes/prices, then
+    `POST /bills/data { network, phone, variationCode }`
+  - `GET /bills/history` for past bill purchases
+  - `network` is one of `mtn`, `glo`, `airtel`, `9mobile`.
+- A failed bill purchase or withdrawal attempt is either automatically
+  refunded back to the wallet (a clear rejection) or left in a `pending`
+  state for manual reconciliation (an ambiguous network/timeout error) -
+  never both charged and refunded.
 
 ## 4. Troubleshooting
 
@@ -198,3 +250,18 @@ terminal (not just "it doesn't work") and it can be diagnosed quickly.
   revisit if the runner base grows much larger.
 - **Admin role granularity** - all admin accounts currently have identical,
   unrestricted access to every `/admin/*` endpoint. No per-admin permissions.
+- **VTpass/withdrawal reconciliation job** - ambiguous failures (network
+  errors, timeouts) leave a wallet transaction `pending` rather than
+  auto-resolving it. There's no background job that calls VTpass's
+  `/requery` endpoint or re-checks a Paystack transfer's status to close
+  these out automatically yet - pending transactions need manual review for
+  now.
+- **VTpass amount units are an unverified assumption** - the integration
+  assumes VTpass takes naira (not kobo, unlike Paystack). Run one real
+  sandbox airtime purchase and confirm the amount charged matches what you
+  sent before enabling this in production - if it's off by 100x, adjust the
+  conversion in `VtpassService.purchase`.
+- **No runner-default/dispute flow** - once a runner accepts an errand, the
+  requester can't cancel it through the API at all, even if the runner never
+  shows up or abandons it. That needs manual (or future admin-mediated)
+  intervention - not built yet.

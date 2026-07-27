@@ -1,5 +1,5 @@
-import { NestFactory } from "@nestjs/core";
-import { ValidationPipe } from "@nestjs/common";
+import { NestFactory, Reflector } from "@nestjs/core";
+import { ClassSerializerInterceptor, ValidationPipe } from "@nestjs/common";
 import { SwaggerModule, DocumentBuilder } from "@nestjs/swagger";
 import helmet from "helmet";
 import compression from "compression";
@@ -47,7 +47,14 @@ async function bootstrap() {
 
   // Global filters and interceptors
   app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
+  // ClassSerializerInterceptor is what actually enforces @Exclude() (e.g.
+  // User/Admin passwordHash) on outgoing responses - without it those
+  // decorators are inert. Registered after TransformInterceptor so it runs
+  // on the raw entity before the {success, data} envelope wraps it.
+  app.useGlobalInterceptors(
+    new TransformInterceptor(),
+    new ClassSerializerInterceptor(app.get(Reflector))
+  );
 
   // Swagger documentation
   const config = new DocumentBuilder()

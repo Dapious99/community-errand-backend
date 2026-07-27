@@ -121,6 +121,34 @@ export class AuthService {
     };
   }
 
+  /**
+   * For the "enter the code we emailed you" screen after a new-device login
+   * attempt - resends without requiring the password again (unlike calling
+   * `login()` again, which would). Same enumeration-safe generic response
+   * as `resendVerification`/`forgotPassword` regardless of whether the
+   * account exists or has a pending device confirmation.
+   */
+  async resendDeviceLoginCode(email: string, deviceId: string) {
+    const user = await this.usersService.findByEmail(email);
+    if (user) {
+      try {
+        await this.otpService.resend(
+          OtpPurpose.NEW_DEVICE_LOGIN,
+          this.deviceLoginIdentifier(user.id, deviceId),
+          user.email
+        );
+      } catch {
+        // Nothing pending (e.g. already trusted, or expired) - fall through
+        // to the same generic response either way.
+      }
+    }
+
+    return {
+      message:
+        "If a device confirmation is pending for that account, a new code has been sent.",
+    };
+  }
+
   async confirmDevice(confirmDeviceDto: ConfirmDeviceDto) {
     const { email, deviceId, code } = confirmDeviceDto;
     const user = await this.usersService.findByEmail(email);

@@ -14,6 +14,8 @@ import { PaymentsService } from "../payments/payments.service";
 import { SettingsService } from "../settings/settings.service";
 import { AiService } from "../ai/ai.service";
 import { NotificationsService } from "../notifications/notifications.service";
+import { WalletService } from "../wallet/wallet.service";
+import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
 
 describe("ErrandsService", () => {
   let service: ErrandsService;
@@ -22,6 +24,7 @@ describe("ErrandsService", () => {
   let settingsService: jest.Mocked<SettingsService>;
   let aiService: jest.Mocked<AiService>;
   let notificationsService: jest.Mocked<NotificationsService>;
+  let walletService: jest.Mocked<WalletService>;
   let updateExecute: jest.Mock;
 
   beforeEach(async () => {
@@ -65,7 +68,7 @@ describe("ErrandsService", () => {
         },
         {
           provide: SettingsService,
-          useValue: { get: jest.fn().mockResolvedValue(250000) },
+          useValue: { get: jest.fn().mockResolvedValue(2500) },
         },
         {
           provide: AiService,
@@ -77,6 +80,14 @@ describe("ErrandsService", () => {
             notifyNearbyTopRatedRunners: jest.fn().mockResolvedValue(undefined),
           },
         },
+        {
+          provide: WalletService,
+          useValue: {
+            debit: jest.fn(),
+            reverseTransaction: jest.fn(),
+            linkTransactionToErrand: jest.fn().mockResolvedValue(undefined),
+          },
+        },
       ],
     }).compile();
 
@@ -86,6 +97,7 @@ describe("ErrandsService", () => {
     settingsService = module.get(SettingsService);
     aiService = module.get(AiService);
     notificationsService = module.get(NotificationsService);
+    walletService = module.get(WalletService);
   });
 
   describe("create", () => {
@@ -96,6 +108,50 @@ describe("ErrandsService", () => {
       price: 1000,
       locations: [],
     } as any;
+
+    beforeEach(() => {
+      walletService.debit.mockResolvedValue({ id: "payment-tx-1" } as any);
+    });
+
+    it("debits the requester's wallet for the errand price before creating it", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(dto, "requester-1", "requester@example.com");
+
+      expect(walletService.debit).toHaveBeenCalledWith(
+        "requester-1",
+        1000,
+        WalletTransactionType.ERRAND_PAYMENT,
+        expect.any(Object)
+      );
+      expect(walletService.linkTransactionToErrand).toHaveBeenCalledWith(
+        "payment-tx-1",
+        "errand-1"
+      );
+    });
+
+    it("throws and creates nothing when the wallet balance is insufficient", async () => {
+      walletService.debit.mockRejectedValue(
+        new BadRequestException("Insufficient wallet balance")
+      );
+
+      await expect(
+        service.create(dto, "requester-1", "requester@example.com")
+      ).rejects.toThrow(BadRequestException);
+      expect(errandsRepo.save).not.toHaveBeenCalled();
+    });
+
+    it("reverses the payment if errand creation fails after the debit succeeded", async () => {
+      errandsRepo.save.mockRejectedValueOnce(new Error("db error"));
+
+      await expect(
+        service.create(dto, "requester-1", "requester@example.com")
+      ).rejects.toThrow("db error");
+      expect(walletService.reverseTransaction).toHaveBeenCalledWith(
+        "payment-tx-1",
+        expect.any(String)
+      );
+    });
 
     it("creates a non-boosted errand without touching payments or AI", async () => {
       errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
@@ -126,13 +182,13 @@ describe("ErrandsService", () => {
 
       expect(settingsService.get).toHaveBeenCalledWith(
         "ai_boost_price_ngn",
-        250000
+        2500
       );
       expect(paymentsService.initializeBoostPayment).toHaveBeenCalledWith(
         "errand-1",
         "requester-1",
         "requester@example.com",
-        250000
+        2500
       );
       expect(result.boostPayment).toEqual({
         authorizationUrl: "https://paystack.test/pay",
@@ -376,10 +432,35 @@ describe("ErrandsService", () => {
       );
     });
 
-    it("cancels the errand and triggers a refund", async () => {
+    it("rejects cancelling an errand that has already been accepted by a runner", async () => {
       errandsRepo.findOne.mockResolvedValue({
         id: "errand-1",
         status: ErrandStatus.ACCEPTED,
+        requesterId: "requester-1",
+      });
+
+      await expect(service.cancel("errand-1", "requester-1")).rejects.toThrow(
+        BadRequestException
+      );
+      expect(paymentsService.processRefund).not.toHaveBeenCalled();
+    });
+
+    it("rejects cancelling an errand that is IN_PROGRESS", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        status: ErrandStatus.IN_PROGRESS,
+        requesterId: "requester-1",
+      });
+
+      await expect(service.cancel("errand-1", "requester-1")).rejects.toThrow(
+        BadRequestException
+      );
+    });
+
+    it("cancels an OPEN errand and triggers a refund", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        status: ErrandStatus.OPEN,
         requesterId: "requester-1",
       });
 

@@ -115,6 +115,68 @@ describe("OtpService", () => {
     ).rejects.toThrow(BadRequestException);
   });
 
+  describe("resend", () => {
+    it("throws when there's nothing pending to resend", async () => {
+      await expect(
+        service.resend(
+          OtpPurpose.NEW_DEVICE_LOGIN,
+          "user-1",
+          "user@example.com"
+        )
+      ).rejects.toThrow(BadRequestException);
+      expect(mailService.send).not.toHaveBeenCalled();
+    });
+
+    it("issues a fresh code, preserving the original metadata", async () => {
+      await service.request(
+        OtpPurpose.BANK_CHANGE,
+        "user-1",
+        "user@example.com",
+        { pendingChanges: { bankName: "GTBank" } }
+      );
+
+      await service.resend(
+        OtpPurpose.BANK_CHANGE,
+        "user-1",
+        "user@example.com"
+      );
+
+      expect(mailService.send).toHaveBeenCalledTimes(2);
+      const [, , secondHtml] = mailService.send.mock.calls[1];
+      const secondCode = secondHtml.match(/(\d{6})/)[1];
+
+      const metadata = await service.verify(
+        OtpPurpose.BANK_CHANGE,
+        "user-1",
+        secondCode
+      );
+      expect(metadata).toEqual({ pendingChanges: { bankName: "GTBank" } });
+    });
+
+    it("resets the attempts counter on resend", async () => {
+      await service.request(
+        OtpPurpose.NEW_DEVICE_LOGIN,
+        "user-1",
+        "user@example.com"
+      );
+      await expect(
+        service.verify(OtpPurpose.NEW_DEVICE_LOGIN, "user-1", "000000")
+      ).rejects.toThrow(BadRequestException);
+
+      await service.resend(
+        OtpPurpose.NEW_DEVICE_LOGIN,
+        "user-1",
+        "user@example.com"
+      );
+
+      const [, , html] = mailService.send.mock.calls[1];
+      const code = html.match(/(\d{6})/)[1];
+      await expect(
+        service.verify(OtpPurpose.NEW_DEVICE_LOGIN, "user-1", code)
+      ).resolves.toBeUndefined();
+    });
+  });
+
   it("invalidates the code once the max attempts are exhausted", async () => {
     await service.request(
       OtpPurpose.PASSWORD_RESET,

@@ -17,6 +17,8 @@ import { SettingsModule } from "./settings/settings.module";
 import { AdminModule } from "./admin/admin.module";
 import { NotificationsModule } from "./notifications/notifications.module";
 import { AiModule } from "./ai/ai.module";
+import { WalletModule } from "./wallet/wallet.module";
+import { BillsModule } from "./bills/bills.module";
 
 @Module({
   imports: [
@@ -42,6 +44,8 @@ import { AiModule } from "./ai/ai.module";
     AdminModule,
     NotificationsModule,
     AiModule,
+    WalletModule,
+    BillsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

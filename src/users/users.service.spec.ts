@@ -35,6 +35,7 @@ describe("UsersService", () => {
           useValue: {
             request: jest.fn().mockResolvedValue(undefined),
             verify: jest.fn(),
+            resend: jest.fn().mockResolvedValue(undefined),
           },
         },
       ],
@@ -113,6 +114,28 @@ describe("UsersService", () => {
 
       expect(result.status).toBe(KYCStatus.APPROVED);
       expect(otpService.request).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("resendBankChangeCode", () => {
+    it("resends via the OTP service using the current user's email", async () => {
+      await service.resendBankChangeCode(user.id);
+
+      expect(otpService.resend).toHaveBeenCalledWith(
+        "bank_change",
+        user.id,
+        user.email
+      );
+    });
+
+    it("propagates the error when there's no pending bank change to resend", async () => {
+      otpService.resend.mockRejectedValue(
+        new Error("nothing pending to resend")
+      );
+
+      await expect(service.resendBankChangeCode(user.id)).rejects.toThrow(
+        "nothing pending to resend"
+      );
     });
   });
 

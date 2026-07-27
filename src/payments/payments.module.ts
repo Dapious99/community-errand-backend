@@ -7,9 +7,13 @@ import { Payment } from "./entities/payment.entity";
 import { Errand } from "../errands/entities/errand.entity";
 import { User } from "../users/entities/user.entity";
 import { KYC } from "../users/entities/kyc.entity";
+import { WalletModule } from "../wallet/wallet.module";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Payment, Errand, User, KYC])],
+  imports: [
+    TypeOrmModule.forFeature([Payment, Errand, User, KYC]),
+    WalletModule,
+  ],
   controllers: [PaymentsController],
   providers: [PaymentsService, PaystackService],
   exports: [PaymentsService],

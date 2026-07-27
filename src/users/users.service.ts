@@ -136,6 +136,18 @@ export class UsersService {
     return this.kycRepository.save(newKyc);
   }
 
+  /**
+   * Requires a pending bank-change OTP to actually exist - unlike
+   * `resendVerification`/`forgotPassword`, this is behind JWT auth already
+   * (no email-enumeration concern), so it's fine to surface a direct error
+   * rather than a generic response when there's nothing pending.
+   */
+  async resendBankChangeCode(userId: string): Promise<{ message: string }> {
+    const user = await this.findOne(userId);
+    await this.otpService.resend(OtpPurpose.BANK_CHANGE, userId, user.email);
+    return { message: "A new confirmation code has been emailed to you." };
+  }
+
   async confirmBankChange(userId: string, code: string): Promise<KYC> {
     const metadata = await this.otpService.verify(
       OtpPurpose.BANK_CHANGE,

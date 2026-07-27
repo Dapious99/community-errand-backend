@@ -20,7 +20,7 @@
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "typeorm": "typeorm-ts-node-commonjs",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/config/data-source.ts",
-    "migration:run": "typeorm-ts-node-commonjs migration:run -d src/config/data-source.ts",
+    "migration:run": "typeorm-ts-node-commonjs migration:run -d src/config/data-source.ts -t each",
     "migration:revert": "typeorm-ts-node-commonjs migration:revert -d src/config/data-source.ts",
     "admin:create": "ts-node -r tsconfig-paths/register scripts/create-admin.ts"
   },

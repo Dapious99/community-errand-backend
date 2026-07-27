@@ -70,6 +70,15 @@ export class UsersController {
     );
   }
 
+  @Post("kyc/resend-bank-change-code")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Resend the pending bank detail change confirmation code",
+  })
+  async resendBankChangeCode(@Request() req) {
+    return this.usersService.resendBankChangeCode(req.user.id);
+  }
+
   @Patch("location")
   @ApiOperation({
     summary: "Report the current user's last known location (runners)",

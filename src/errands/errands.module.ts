@@ -8,6 +8,7 @@ import { MediaAttachment } from "./entities/media-attachment.entity";
 import { PaymentsModule } from "../payments/payments.module";
 import { AiModule } from "../ai/ai.module";
 import { NotificationsModule } from "../notifications/notifications.module";
+import { WalletModule } from "../wallet/wallet.module";
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { NotificationsModule } from "../notifications/notifications.module";
     PaymentsModule,
     AiModule,
     NotificationsModule,
+    WalletModule,
   ],
   controllers: [ErrandsController],
   providers: [ErrandsService],

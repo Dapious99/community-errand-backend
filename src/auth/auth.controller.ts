@@ -9,6 +9,7 @@ import { ResendVerificationDto } from "./dto/resend-verification.dto";
 import { ForgotPasswordDto } from "./dto/forgot-password.dto";
 import { ResetPasswordDto } from "./dto/reset-password.dto";
 import { ConfirmDeviceDto } from "./dto/confirm-device.dto";
+import { ResendDeviceCodeDto } from "./dto/resend-device-code.dto";
 
 @ApiTags("auth")
 @Controller("auth")
@@ -38,6 +39,18 @@ export class AuthController {
   @ApiOperation({ summary: "Confirm a new-device login with the emailed code" })
   async confirmDevice(@Body() confirmDeviceDto: ConfirmDeviceDto) {
     return this.authService.confirmDevice(confirmDeviceDto);
+  }
+
+  @Post("login/resend-device-code")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: "Resend the new-device login confirmation code",
+  })
+  async resendDeviceCode(@Body() resendDeviceCodeDto: ResendDeviceCodeDto) {
+    return this.authService.resendDeviceLoginCode(
+      resendDeviceCodeDto.email,
+      resendDeviceCodeDto.deviceId
+    );
   }
 
   @Post("refresh")

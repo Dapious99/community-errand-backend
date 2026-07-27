@@ -91,6 +91,29 @@ export class OtpService {
   }
 
   /**
+   * Re-issues a fresh code (new value, full TTL, attempts reset) for a
+   * purpose/identifier that already has one pending, preserving whatever
+   * metadata was stored alongside it (e.g. the pending bank-change payload).
+   * Throws if there's nothing currently pending to resend - the caller
+   * should start the original flow again in that case.
+   */
+  async resend(
+    purpose: OtpPurpose,
+    identifier: string,
+    email: string
+  ): Promise<void> {
+    const raw = await this.redisService.get(this.codeKey(purpose, identifier));
+    if (!raw) {
+      throw new BadRequestException(
+        "There's nothing pending to resend a code for - start the process again."
+      );
+    }
+
+    const { metadata }: StoredOtp = JSON.parse(raw);
+    await this.request(purpose, identifier, email, metadata);
+  }
+
+  /**
    * Verifies a submitted code. Throws on mismatch, expiry, or once the
    * configured max attempts have been used up (the code is invalidated
    * either way, forcing the user to request a fresh one).
