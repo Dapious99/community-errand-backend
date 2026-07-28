@@ -1,5 +1,6 @@
 import {
   Injectable,
+  InternalServerErrorException,
   NotFoundException,
   ConflictException,
 } from "@nestjs/common";
@@ -14,6 +15,7 @@ import { CreateKycDto } from "./dto/create-kyc.dto";
 import { RatingsService } from "../ratings/ratings.service";
 import { OtpService } from "../otp/otp.service";
 import { OtpPurpose } from "../otp/otp-purpose.enum";
+import { generateReferralCodeCandidate } from "./utils/referral-code";
 
 @Injectable()
 export class UsersService {
@@ -27,7 +29,7 @@ export class UsersService {
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
-    const { email, phone, password, ...rest } = createUserDto;
+    const { email, phone, password, referralCode, ...rest } = createUserDto;
 
     // Check if user exists
     const existingUser = await this.usersRepository.findOne({
@@ -43,12 +45,20 @@ export class UsersService {
     // Hash password
     const passwordHash = await bcrypt.hash(password, 10);
 
+    // An invalid/unknown referral code is silently ignored - it never fails
+    // registration, it just means no referral relationship gets recorded.
+    const referrer = referralCode
+      ? await this.findByReferralCode(referralCode)
+      : null;
+
     const user = this.usersRepository.create({
       ...rest,
       email,
       phone,
       passwordHash,
       role: rest.role || UserRole.REQUESTER,
+      referralCode: await this.generateUniqueReferralCode(),
+      referredByUserId: referrer?.id,
     });
 
     return this.usersRepository.save(user);
@@ -69,6 +79,25 @@ export class UsersService {
 
   async findByEmail(email: string): Promise<User | null> {
     return this.usersRepository.findOne({ where: { email } });
+  }
+
+  async findByReferralCode(code: string): Promise<User | null> {
+    return this.usersRepository.findOne({ where: { referralCode: code } });
+  }
+
+  private async generateUniqueReferralCode(): Promise<string> {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const code = generateReferralCodeCandidate();
+      const existing = await this.usersRepository.findOne({
+        where: { referralCode: code },
+      });
+      if (!existing) {
+        return code;
+      }
+    }
+    throw new InternalServerErrorException(
+      "Failed to generate a unique referral code"
+    );
   }
 
   async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
@@ -277,6 +306,42 @@ export class UsersService {
       .setParameters({ lat: latitude, lng: longitude, radiusKm })
       .orderBy("user.ratingAvg", "DESC")
       .addOrderBy("distance_km", "ASC")
+      .limit(limit)
+      .getMany();
+  }
+
+  /** Same haversine approach as findNearbyTopRatedRunners, filtered to currently-active Pro subscribers instead of rating. */
+  async findNearbyProUsers(
+    latitude: number,
+    longitude: number,
+    radiusKm = 10,
+    limit = 50
+  ): Promise<User[]> {
+    const distanceExpr = `
+      6371 * acos(
+        LEAST(1, GREATEST(-1,
+          cos(radians(:lat)) * cos(radians("user"."lastLatitude")) *
+          cos(radians("user"."lastLongitude") - radians(:lng)) +
+          sin(radians(:lat)) * sin(radians("user"."lastLatitude"))
+        ))
+      )
+    `;
+
+    return this.usersRepository
+      .createQueryBuilder("user")
+      .addSelect(distanceExpr, "distance_km")
+      .where("user.role IN (:...roles)", {
+        roles: [UserRole.RUNNER, UserRole.BOTH],
+      })
+      .andWhere(
+        'user."lastLatitude" IS NOT NULL AND user."lastLongitude" IS NOT NULL'
+      )
+      .andWhere(
+        'user."proExpiresAt" IS NOT NULL AND user."proExpiresAt" > NOW()'
+      )
+      .andWhere(`${distanceExpr} <= :radiusKm`)
+      .setParameters({ lat: latitude, lng: longitude, radiusKm })
+      .orderBy("distance_km", "ASC")
       .limit(limit)
       .getMany();
   }

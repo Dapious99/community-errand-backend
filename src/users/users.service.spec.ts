@@ -8,6 +8,7 @@ import { OtpService } from "../otp/otp.service";
 
 describe("UsersService", () => {
   let service: UsersService;
+  let usersRepo: any;
   let kycRepo: any;
   let otpService: jest.Mocked<OtpService>;
 
@@ -19,7 +20,11 @@ describe("UsersService", () => {
         UsersService,
         {
           provide: getRepositoryToken(User),
-          useValue: { findOne: jest.fn().mockResolvedValue(user) },
+          useValue: {
+            findOne: jest.fn().mockResolvedValue(user),
+            create: jest.fn((data) => ({ id: "new-user-1", ...data })),
+            save: jest.fn((data) => Promise.resolve(data)),
+          },
         },
         {
           provide: getRepositoryToken(KYC),
@@ -42,8 +47,53 @@ describe("UsersService", () => {
     }).compile();
 
     service = module.get(UsersService);
+    usersRepo = module.get(getRepositoryToken(User));
     kycRepo = module.get(getRepositoryToken(KYC));
     otpService = module.get(OtpService);
+  });
+
+  describe("create", () => {
+    const dto = {
+      email: "new@example.com",
+      name: "New User",
+      password: "password123",
+    } as any;
+
+    it("generates a unique referral code for the new user", async () => {
+      usersRepo.findOne.mockResolvedValue(null); // no existing user, no code collision
+
+      const result: any = await service.create(dto);
+
+      expect(result.referralCode).toMatch(/^CEL.{5}$/);
+    });
+
+    it("resolves a valid referralCode to the referrer's id", async () => {
+      usersRepo.findOne
+        .mockResolvedValueOnce(null) // existing-user-by-email/phone check
+        .mockResolvedValueOnce({ id: "referrer-1", referralCode: "ABCD1234" }) // findByReferralCode
+        .mockResolvedValueOnce(null); // referral-code-collision check
+
+      const result: any = await service.create({
+        ...dto,
+        referralCode: "ABCD1234",
+      });
+
+      expect(result.referredByUserId).toBe("referrer-1");
+    });
+
+    it("silently ignores an unknown referralCode instead of failing registration", async () => {
+      usersRepo.findOne
+        .mockResolvedValueOnce(null) // existing-user check
+        .mockResolvedValueOnce(null) // findByReferralCode - not found
+        .mockResolvedValueOnce(null); // collision check
+
+      const result: any = await service.create({
+        ...dto,
+        referralCode: "UNKNOWN1",
+      });
+
+      expect(result.referredByUserId).toBeUndefined();
+    });
   });
 
   describe("submitKyc", () => {

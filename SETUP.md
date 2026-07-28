@@ -208,6 +208,46 @@ through internally now:
   state for manual reconciliation (an ambiguous network/timeout error) -
   never both charged and refunded.
 
+### Pro subscriptions & referrals
+- **Pricing is admin-configurable, not hardcoded**: `pro_price_monthly_ngn`,
+  `pro_price_quarterly_ngn`, `pro_price_semi_annual_ngn`, `pro_price_annual_ngn`
+  (plus `pro_priority_price_threshold_ngn`, `pro_priority_window_minutes`, and
+  `referral_bonus_ngn`) all go through the same generic settings mechanism as
+  the AI-Boost price - `GET /admin/settings` to see current values,
+  `PATCH /admin/settings/pro_price_monthly_ngn { "value": 2000 }` to change
+  one. No code change or redeploy needed to adjust pricing.
+- **Subscribing**: `POST /subscriptions/subscribe { plan, autoRenew }` -
+  `plan` is `monthly` | `quarterly` | `semi_annual` | `annual`. Debited from
+  the wallet, same insufficient-balance 400 as posting an errand. Check
+  `GET /subscriptions/me` for `{ isPro, proExpiresAt, plan, autoRenew }` to
+  drive any "you're Pro" UI. `POST /subscriptions/cancel-auto-renew` turns
+  off auto-renew without ending the current period early.
+- **Auto-renew**: if enabled, the backend tries to renew automatically once
+  `proExpiresAt` passes (checked hourly). If the wallet can't cover it, Pro
+  just lapses - **there's no push notification for this yet**, so if you
+  want to warn users before/after a lapse, poll `GET /subscriptions/me` or
+  build that notification client-side for now.
+- **Priority-access errands**: `POST /errands` accepts an optional
+  `requiredRunners` (default 1). Errands above a price threshold or with
+  `requiredRunners > 1` become invisible to non-Pro users in `GET /errands`
+  (and non-Pro `PATCH /errands/:id/accept` calls are rejected with a 403)
+  until a configurable window passes. There's no field on the errand telling
+  a non-Pro user *why* it's temporarily hidden - it's just absent from their
+  feed - so don't build UI that assumes 100% of errands ever surface to
+  every user immediately.
+- **Referrals**: every signup gets a `referralCode` back immediately (even
+  before going Pro) - show it right away so users can start sharing.
+  `POST /auth/register` accepts an optional `referralCode` field for the new
+  user to redeem someone else's code. `GET /referrals/me` returns the
+  current user's code plus pending/completed/void counts. **The bonus is
+  Pro-gated at signup time, not at payout time** - a referrer only needs to
+  be Pro at the moment the person they referred signs up; if so, the
+  referral is locked in and pays out later regardless of whether their Pro
+  has since lapsed. If they weren't Pro at that signup moment, it's void
+  immediately and can never pay out even if they subscribe afterward. Make
+  this timing clear in the UI so users know *when* their Pro status
+  actually matters.
+
 ## 4. Troubleshooting
 
 **"blocked by CORS policy" in the browser console**
@@ -265,3 +305,13 @@ terminal (not just "it doesn't work") and it can be diagnosed quickly.
   requester can't cancel it through the API at all, even if the runner never
   shows up or abandons it. That needs manual (or future admin-mediated)
   intervention - not built yet.
+- **No multi-runner errand fulfillment** - `requiredRunners` only gates Pro
+  priority access; only one runner can ever actually accept/complete a given
+  errand today.
+- **No lapse/renewal-failure notification** - Pro auto-renewal failing or
+  Pro simply expiring doesn't push-notify the user; check `GET /subscriptions/me`
+  client-side, or add a notification hook in `SubscriptionsService.processRenewals`
+  later.
+- **Voided referrals aren't retried** - if a referrer wasn't Pro at the exact
+  moment the person they referred signed up, that referral is forfeited
+  permanently, even if they subscribe to Pro minutes later.

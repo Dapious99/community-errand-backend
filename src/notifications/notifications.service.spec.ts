@@ -30,7 +30,10 @@ describe("NotificationsService", () => {
         },
         {
           provide: UsersService,
-          useValue: { findNearbyTopRatedRunners: jest.fn() },
+          useValue: {
+            findNearbyTopRatedRunners: jest.fn(),
+            findNearbyProUsers: jest.fn(),
+          },
         },
       ],
     }).compile();
@@ -151,6 +154,48 @@ describe("NotificationsService", () => {
         3.4,
         10,
         20
+      );
+      expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("notifyNearbyProUsers", () => {
+    it("does nothing when no Pro users are nearby", async () => {
+      usersService.findNearbyProUsers.mockResolvedValue([]);
+
+      await service.notifyNearbyProUsers({
+        latitude: 6.5,
+        longitude: 3.4,
+        title: "New errand nearby!",
+        body: "Buy groceries",
+      });
+
+      expect(repo.find).not.toHaveBeenCalled();
+    });
+
+    it("sends to every nearby Pro user found", async () => {
+      usersService.findNearbyProUsers.mockResolvedValue([
+        { id: "pro-1" } as any,
+        { id: "pro-2" } as any,
+      ]);
+      repo.find.mockResolvedValue([
+        { userId: "pro-1", expoPushToken: "ExponentPushToken[a]" },
+        { userId: "pro-2", expoPushToken: "ExponentPushToken[b]" },
+      ]);
+      mockedAxios.post.mockResolvedValue({ data: {} });
+
+      await service.notifyNearbyProUsers({
+        latitude: 6.5,
+        longitude: 3.4,
+        title: "New errand nearby!",
+        body: "Buy groceries",
+      });
+
+      expect(usersService.findNearbyProUsers).toHaveBeenCalledWith(
+        6.5,
+        3.4,
+        10,
+        50
       );
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
     });

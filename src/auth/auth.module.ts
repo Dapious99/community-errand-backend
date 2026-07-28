@@ -8,12 +8,14 @@ import { AuthController } from "./auth.controller";
 import { JwtStrategy } from "./strategies/jwt.strategy";
 import { UsersModule } from "../users/users.module";
 import { OtpModule } from "../otp/otp.module";
+import { ReferralsModule } from "../referrals/referrals.module";
 import { TrustedDevice } from "./entities/trusted-device.entity";
 
 @Module({
   imports: [
     UsersModule,
     OtpModule,
+    ReferralsModule,
     TypeOrmModule.forFeature([TrustedDevice]),
     PassportModule,
     JwtModule.registerAsync({

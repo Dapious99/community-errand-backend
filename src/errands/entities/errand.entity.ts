@@ -107,6 +107,12 @@ export class Errand {
   @Column({ type: "timestamp", nullable: true })
   boostedAt?: Date;
 
+  @Column({ default: 1 })
+  requiredRunners: number;
+
+  @Column({ type: "timestamp", nullable: true })
+  priorityUntil?: Date;
+
   @CreateDateColumn()
   createdAt: Date;
 

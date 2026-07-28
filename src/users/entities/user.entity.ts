@@ -81,6 +81,16 @@ export class User {
   @Column({ type: "timestamp", nullable: true })
   lastLocationAt?: Date;
 
+  @Column({ type: "timestamp", nullable: true })
+  proExpiresAt?: Date;
+
+  @Column({ unique: true })
+  @Index()
+  referralCode: string;
+
+  @Column({ nullable: true })
+  referredByUserId?: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

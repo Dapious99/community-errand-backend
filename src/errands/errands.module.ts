@@ -9,6 +9,8 @@ import { PaymentsModule } from "../payments/payments.module";
 import { AiModule } from "../ai/ai.module";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { WalletModule } from "../wallet/wallet.module";
+import { UsersModule } from "../users/users.module";
+import { ReferralsModule } from "../referrals/referrals.module";
 
 @Module({
   imports: [
@@ -17,6 +19,8 @@ import { WalletModule } from "../wallet/wallet.module";
     AiModule,
     NotificationsModule,
     WalletModule,
+    UsersModule,
+    ReferralsModule,
   ],
   controllers: [ErrandsController],
   providers: [ErrandsService],

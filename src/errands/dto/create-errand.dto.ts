@@ -79,6 +79,16 @@ export class CreateErrandDto {
   @Min(0)
   tip?: number;
 
+  @ApiPropertyOptional({
+    default: 1,
+    description:
+      "How many runners this errand needs. Errands needing more than one, or above the configurable priority-price threshold, are shown to Pro runners first (see the Pro priority-access window).",
+  })
+  @IsOptional()
+  @IsNumber()
+  @Min(1)
+  requiredRunners?: number;
+
   @ApiProperty({ type: [LocationDto] })
   @IsArray()
   @ValidateNested({ each: true })

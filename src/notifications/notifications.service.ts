@@ -114,4 +114,31 @@ export class NotificationsService {
       params.data
     );
   }
+
+  /** Pro perk: unlike notifyNearbyTopRatedRunners (boost-payment-gated), this fires for every new errand. */
+  async notifyNearbyProUsers(params: {
+    latitude: number;
+    longitude: number;
+    radiusKm?: number;
+    limit?: number;
+    title: string;
+    body: string;
+    data?: Record<string, any>;
+  }): Promise<void> {
+    const proUsers = await this.usersService.findNearbyProUsers(
+      params.latitude,
+      params.longitude,
+      params.radiusKm ?? 10,
+      params.limit ?? 50
+    );
+
+    if (proUsers.length === 0) return;
+
+    await this.sendToUsers(
+      proUsers.map((u) => u.id),
+      params.title,
+      params.body,
+      params.data
+    );
+  }
 }

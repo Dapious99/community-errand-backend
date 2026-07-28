@@ -16,6 +16,8 @@ import { AiService } from "../ai/ai.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
+import { UsersService } from "../users/users.service";
+import { ReferralsService } from "../referrals/referrals.service";
 
 describe("ErrandsService", () => {
   let service: ErrandsService;
@@ -25,15 +27,25 @@ describe("ErrandsService", () => {
   let aiService: jest.Mocked<AiService>;
   let notificationsService: jest.Mocked<NotificationsService>;
   let walletService: jest.Mocked<WalletService>;
+  let usersService: jest.Mocked<UsersService>;
+  let referralsService: jest.Mocked<ReferralsService>;
   let updateExecute: jest.Mock;
+  let queryBuilder: any;
 
   beforeEach(async () => {
     updateExecute = jest.fn().mockResolvedValue({ affected: 1 });
-    const queryBuilder = {
+    queryBuilder = {
       update: jest.fn().mockReturnThis(),
       set: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
       execute: updateExecute,
+      leftJoinAndSelect: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -47,6 +59,7 @@ describe("ErrandsService", () => {
             update: jest.fn().mockResolvedValue(undefined),
             findOne: jest.fn(),
             find: jest.fn(),
+            count: jest.fn().mockResolvedValue(1),
             createQueryBuilder: jest.fn(() => queryBuilder),
           },
         },
@@ -68,7 +81,9 @@ describe("ErrandsService", () => {
         },
         {
           provide: SettingsService,
-          useValue: { get: jest.fn().mockResolvedValue(2500) },
+          useValue: {
+            get: jest.fn((key: string, fallback?: any) => fallback),
+          },
         },
         {
           provide: AiService,
@@ -78,6 +93,7 @@ describe("ErrandsService", () => {
           provide: NotificationsService,
           useValue: {
             notifyNearbyTopRatedRunners: jest.fn().mockResolvedValue(undefined),
+            notifyNearbyProUsers: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
@@ -86,6 +102,20 @@ describe("ErrandsService", () => {
             debit: jest.fn(),
             reverseTransaction: jest.fn(),
             linkTransactionToErrand: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: UsersService,
+          useValue: {
+            findOne: jest
+              .fn()
+              .mockResolvedValue({ id: "user-1", proExpiresAt: null }),
+          },
+        },
+        {
+          provide: ReferralsService,
+          useValue: {
+            completeIfPending: jest.fn().mockResolvedValue(undefined),
           },
         },
       ],
@@ -98,6 +128,8 @@ describe("ErrandsService", () => {
     aiService = module.get(AiService);
     notificationsService = module.get(NotificationsService);
     walletService = module.get(WalletService);
+    usersService = module.get(UsersService);
+    referralsService = module.get(ReferralsService);
   });
 
   describe("create", () => {
@@ -210,6 +242,71 @@ describe("ErrandsService", () => {
 
       expect(result.boostPayment).toBeUndefined();
     });
+
+    it("sets a priority window when the price is above the configurable threshold", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(
+        { ...dto, price: 999_999 },
+        "requester-1",
+        "requester@example.com"
+      );
+
+      expect(errandsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ priorityUntil: expect.any(Date) })
+      );
+    });
+
+    it("sets a priority window when multiple runners are required, regardless of price", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(
+        { ...dto, requiredRunners: 3 },
+        "requester-1",
+        "requester@example.com"
+      );
+
+      expect(errandsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          requiredRunners: 3,
+          priorityUntil: expect.any(Date),
+        })
+      );
+    });
+
+    it("does not set a priority window for an ordinary, single-runner, low-price errand", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(dto, "requester-1", "requester@example.com");
+
+      expect(errandsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ priorityUntil: undefined })
+      );
+    });
+
+    it("notifies nearby Pro users for every errand with a pickup location, boosted or not", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        ...dto,
+        locations: [
+          { type: LocationType.PICKUP, latitude: 6.5, longitude: 3.4 },
+        ],
+      });
+
+      await service.create(dto, "requester-1", "requester@example.com");
+
+      expect(notificationsService.notifyNearbyProUsers).toHaveBeenCalledWith(
+        expect.objectContaining({ latitude: 6.5, longitude: 3.4 })
+      );
+    });
+
+    it("skips the Pro notification when the errand has no pickup coordinates", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(dto, "requester-1", "requester@example.com");
+
+      expect(notificationsService.notifyNearbyProUsers).not.toHaveBeenCalled();
+    });
   });
 
   describe("handleBoostPaymentSucceeded", () => {
@@ -278,12 +375,104 @@ describe("ErrandsService", () => {
     });
   });
 
+  describe("findAll", () => {
+    it("hides priority-window errands from a non-Pro caller", async () => {
+      usersService.findOne.mockResolvedValue({
+        id: "user-1",
+        proExpiresAt: null,
+      } as any);
+
+      await service.findAll({} as any, "user-1");
+
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+        "(errand.priorityUntil IS NULL OR errand.priorityUntil <= :now)",
+        expect.objectContaining({ now: expect.any(Date) })
+      );
+    });
+
+    it("does not apply the priority filter for a Pro caller", async () => {
+      usersService.findOne.mockResolvedValue({
+        id: "user-1",
+        proExpiresAt: new Date(Date.now() + 60_000),
+      } as any);
+
+      await service.findAll({} as any, "user-1");
+
+      expect(queryBuilder.andWhere).not.toHaveBeenCalledWith(
+        expect.stringContaining("priorityUntil"),
+        expect.any(Object)
+      );
+    });
+  });
+
   describe("acceptErrand", () => {
     const openErrand = {
       id: "errand-1",
       status: ErrandStatus.OPEN,
       requesterId: "requester-1",
     };
+
+    it("rejects a non-Pro runner during an errand's priority window", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        ...openErrand,
+        priorityUntil: new Date(Date.now() + 60_000),
+      });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+      } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("allows a Pro runner to accept during the priority window", async () => {
+      errandsRepo.findOne
+        .mockResolvedValueOnce({
+          ...openErrand,
+          priorityUntil: new Date(Date.now() + 60_000),
+        })
+        .mockResolvedValueOnce({
+          ...openErrand,
+          status: ErrandStatus.ACCEPTED,
+          runnerId: "runner-1",
+        });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: new Date(Date.now() + 60_000),
+      } as any);
+
+      const result = await service.acceptErrand(
+        "errand-1",
+        "runner-1",
+        UserRole.RUNNER
+      );
+
+      expect(result.status).toBe(ErrandStatus.ACCEPTED);
+    });
+
+    it("allows any runner once the priority window has passed", async () => {
+      errandsRepo.findOne
+        .mockResolvedValueOnce({
+          ...openErrand,
+          priorityUntil: new Date(Date.now() - 60_000),
+        })
+        .mockResolvedValueOnce({
+          ...openErrand,
+          status: ErrandStatus.ACCEPTED,
+          runnerId: "runner-1",
+        });
+
+      const result = await service.acceptErrand(
+        "errand-1",
+        "runner-1",
+        UserRole.RUNNER
+      );
+
+      expect(result.status).toBe(ErrandStatus.ACCEPTED);
+      expect(usersService.findOne).not.toHaveBeenCalled();
+    });
 
     it("rejects requesters trying to accept their own errand", async () => {
       errandsRepo.findOne.mockResolvedValue(openErrand);
@@ -389,6 +578,50 @@ describe("ErrandsService", () => {
       expect(result.status).toBe(ErrandStatus.COMPLETED);
       expect(result.completedAt).toBeInstanceOf(Date);
       expect(paymentsService.processPayout).toHaveBeenCalledWith("errand-1");
+    });
+
+    it("checks for a pending referral bonus for both the requester and runner on their first completed errand", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      errandsRepo.count.mockResolvedValue(1); // this is their first completed errand
+
+      await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(referralsService.completeIfPending).toHaveBeenCalledWith(
+        "requester-1"
+      );
+      expect(referralsService.completeIfPending).toHaveBeenCalledWith(
+        "runner-1"
+      );
+    });
+
+    it("does not check for a referral bonus if this isn't the user's first completed errand", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      errandsRepo.count.mockResolvedValue(2); // they've completed one before
+
+      await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(referralsService.completeIfPending).not.toHaveBeenCalled();
+    });
+
+    it("does not fail the request if the referral completion check throws", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      errandsRepo.count.mockRejectedValue(new Error("db down"));
+
+      const result = await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(result.status).toBe(ErrandStatus.COMPLETED);
     });
 
     it("does not fail the request if payout processing throws", async () => {

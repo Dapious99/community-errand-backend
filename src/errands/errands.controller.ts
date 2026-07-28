@@ -60,8 +60,8 @@ export class ErrandsController {
 
   @Get()
   @ApiOperation({ summary: "Get all errands with filters" })
-  async findAll(@Query() filterDto: FilterErrandsDto) {
-    return this.errandsService.findAll(filterDto);
+  async findAll(@Query() filterDto: FilterErrandsDto, @Request() req) {
+    return this.errandsService.findAll(filterDto, req.user.id);
   }
 
   @Get("my")

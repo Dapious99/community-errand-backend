@@ -1,6 +1,6 @@
 # Community Errand Backend API
 
-Backend API for Community Errand App built with NestJS, PostgreSQL, and TypeORM. Implements the full [PRD](./PRD.md) plus an AI feature suite: auth, errands, real-time messaging, ratings, Paystack payments, a runner wallet, VTpass bill payments, KYC, file uploads, an admin panel, push notifications, geolocation, and Claude-powered AI features.
+Backend API for Community Errand App built with NestJS, PostgreSQL, and TypeORM. Implements the full [PRD](./PRD.md) plus an AI feature suite: auth, errands, real-time messaging, ratings, Paystack payments, a runner wallet, VTpass bill payments, Pro subscriptions, a referral program, KYC, file uploads, an admin panel, push notifications, geolocation, and Claude-powered AI features.
 
 ## Tech Stack
 
@@ -8,8 +8,10 @@ Backend API for Community Errand App built with NestJS, PostgreSQL, and TypeORM.
 - **Database**: PostgreSQL with TypeORM
 - **Authentication**: JWT (access + refresh tokens) + email OTP for signup verification, password reset, new-device login, and bank-change confirmation. Separate JWT auth for the admin panel.
 - **Payments**: Paystack integration (wallet deposit/top-up, AI-boost, wallet withdrawal transfers)
-- **Wallet**: In-app ledger shared by both sides of the marketplace - requesters deposit and spend on errands, runners earn and spend/withdraw; airtime/data bill purchases and bank withdrawal are separate explicit actions off that balance
+- **Wallet**: In-app ledger shared by both sides of the marketplace - requesters deposit and spend on errands, runners earn and spend/withdraw; airtime/data bill purchases, Pro subscriptions, and bank withdrawal are all separate explicit actions off that balance
 - **Bills**: VTpass integration for airtime/data top-ups
+- **Subscriptions**: Wallet-billed Pro tiers (monthly/quarterly/semi-annual/annual) with optional auto-renewal, run by an hourly `@nestjs/schedule` cron job - the first scheduled/recurring job in this codebase
+- **Referrals**: Pro-gated referral bonuses, paid from the platform (not the referred user) into the referrer's wallet
 - **File Storage**: Cloudinary
 - **Real-time**: Socket.io for messaging
 - **Cache/OTP store**: Redis (via ioredis) - OTP codes live here only, never in Postgres
@@ -75,8 +77,12 @@ src/
 ├── messages/          # Messaging with WebSockets, AI smart replies
 ├── ratings/           # Ratings & reviews
 ├── payments/          # Paystack payment integration (wallet deposit/withdrawal transfers, AI-boost)
-├── wallet/            # In-app wallet ledger (deposit, errand payment, earning, withdrawal, bill purchase, reversal)
+├── wallet/            # In-app wallet ledger (deposit, errand payment, earning, withdrawal, bill purchase, subscription, referral bonus, reversal)
 ├── bills/             # VTpass airtime/data bill purchases, debited from the wallet
+├── subscriptions/     # Pro subscriptions, wallet-billed, hourly auto-renewal cron
+├── referrals/         # Pro-gated referral bonuses
+├── subscriptions/     # Pro subscriptions (wallet-billed, auto-renewal cron job)
+├── referrals/         # Pro-only referral program (bonus on referred user's first completed errand)
 ├── uploads/           # File upload handling (Cloudinary)
 ├── otp/               # OTP generate/verify engine (Redis-backed, 10min TTL, 5 attempts)
 ├── mail/              # Transactional email (Resend)
@@ -98,7 +104,7 @@ All endpoints are prefixed with `/api/v1`. Responses are wrapped as
 `{ statusCode, timestamp, path, message }` on error.
 
 ### Authentication
-- `POST /auth/register` - Register new user (accepts optional `deviceId` - see [Device trust](#device-trust--otp-flows) below)
+- `POST /auth/register` - Register new user (accepts optional `deviceId` - see [Device trust](#device-trust--otp-flows) below; accepts optional `referralCode` - see [Referrals](#referrals-pro-only) below. Every new user gets their own `referralCode` back in the response, valid immediately even before they're Pro.)
 - `POST /auth/login` - Login (accepts optional `deviceId`; may return `{ requiresDeviceVerification: true }` instead of tokens)
 - `POST /auth/login/confirm-device` - Confirm a new-device login with the emailed code, returns tokens
 - `POST /auth/login/resend-device-code` - Resend the new-device login confirmation code (without re-entering the password)
@@ -120,7 +126,7 @@ All endpoints are prefixed with `/api/v1`. Responses are wrapped as
 - `GET /users/:id/ratings` - Get a user's ratings + rating stats
 
 ### Errands
-- `POST /errands` - Create errand (accepts optional `isBoosted: true` - see [AI Features](#ai-features) below). **Debits the requester's wallet for the errand price immediately** - if the balance can't cover it, the errand is rejected with a 400 and nothing is created. Deposit first via `POST /payments/initialize` (see Payments below).
+- `POST /errands` - Create errand (accepts optional `isBoosted: true` - see [AI Features](#ai-features) below; accepts optional `requiredRunners` - see [Subscriptions](#subscriptions-pro) below). **Debits the requester's wallet for the errand price immediately** - if the balance can't cover it, the errand is rejected with a 400 and nothing is created. Deposit first via `POST /payments/initialize` (see Payments below).
 - `GET /errands` - List errands (filters: category, status, urgency, price range, search, sortBy, page, limit)
 - `GET /errands/my` - Get current user's errands (posted + accepted)
 - `GET /errands/:id` - Get errand details
@@ -183,6 +189,28 @@ airtime/data via the Bills endpoints below instead of sitting idle.
 credentials) automatically refunds the wallet debit. A network/timeout error
 where VTpass never responded is left `pending` for manual reconciliation
 rather than risking a double-spend by auto-refunding - see Known Limitations.
+
+### Subscriptions (Pro)
+- `POST /subscriptions/subscribe { plan, autoRenew? }` - Subscribe/renew/extend Pro, debited from your wallet. `plan` is one of `monthly`, `quarterly`, `semi_annual`, `annual`. If you already have unexpired Pro time left, the new period is **added on top** of it rather than overwriting it.
+- `POST /subscriptions/cancel-auto-renew` - Turn off auto-renew - Pro stays active until it expires, it just won't renew itself
+- `GET /subscriptions/me` - `{ isPro, proExpiresAt, plan, autoRenew }`
+
+Pricing per tier is admin-configurable (`pro_price_monthly_ngn`, `pro_price_quarterly_ngn`, `pro_price_semi_annual_ngn`, `pro_price_annual_ngn` - same generic `PATCH /admin/settings/:key` mechanism as everything else) - the tiers themselves (30/90/180/365 days) are fixed. Auto-renewal runs hourly in the background; **if the wallet can't cover a renewal, Pro simply lapses immediately - there's no grace period or retry in this version.**
+
+**Pro perks (v1):**
+- **Priority access** - errands priced above a configurable threshold (`pro_priority_price_threshold_ngn`, default ₦20,000), or created with `requiredRunners > 1`, are visible/acceptable to Pro runners only for a configurable window (`pro_priority_window_minutes`, default 30) before anyone else can see or accept them. Enforced both in the `GET /errands` listing and in `PATCH /errands/:id/accept` itself (so a non-Pro runner can't work around the filter with a direct link).
+  - **Known scope limit**: `requiredRunners` is a qualifying signal only - there's no multi-runner *fulfillment* yet (only one runner can ultimately accept and complete any given errand, same as today). Building that out (partial completion, per-runner payout, etc.) is a separate, larger feature.
+- **Proactive nearby-errand push notifications** - every new errand (not just AI-boosted ones) notifies nearby Pro runners immediately via `POST /notifications/register-token`'s registered device. Non-Pro users don't get this; they only see new errands when they check the feed.
+- More perks can be added later by gating on the same `isPro` check (`src/users/utils/is-pro-user.ts`) - nothing here is hard-coded to just these two.
+
+### Referrals (Pro-only)
+- `GET /referrals/me` - `{ referralCode, pending, completed, void }` - your own referral code and counts
+
+Codes always look like `CEL7K@3B` - the fixed `CEL` prefix plus 5 shuffled
+characters (2 digits, 2 letters, 1 special character from `!@$%*-_`, chosen
+to stay URL-safe if a code ends up in a shared deep link).
+
+Every user gets a `referralCode` at signup (see Authentication above), but referring is a Pro perk - **eligibility is decided once, at the moment someone signs up with your code, not later at payout time.** If you're Pro when they sign up, the referral is locked in as pending and pays out a fixed, admin-configurable amount (`referral_bonus_ngn`, default ₦500) to your wallet the moment the person you referred completes their **first-ever** errand (as requester or runner - whichever happens first) - **even if your Pro subscription has since lapsed by then.** If you *weren't* Pro at the moment they signed up, the referral is voided immediately (visible in your `void` count) and can never pay out, even if you subscribe to Pro afterward.
 
 ### Uploads
 - `POST /uploads/image` - Upload a single image (max 5MB)
@@ -316,15 +344,19 @@ npm run test:e2e
 npm run test:cov
 ```
 
-Unit tests currently cover the core business logic in `auth`, `errands`,
+Unit tests currently cover the core business logic in `auth`, `errands`
+(including the Pro priority-access window and referral-completion hook),
 `ratings`, `payments` (status transitions, permission checks, fee
 calculations, refund fallback behavior, boost payment gating, wallet-based
 payout crediting, withdrawal fee math and reversal/ambiguous-error handling),
 `wallet` (atomic credit/debit, insufficient-balance rejection, reversal),
-`bills` (VTpass purchase success/rejection/ambiguous-error handling), `otp`,
-and `users` (KYC bank-change gating). Expanding coverage to the
-remaining controllers/services (`admin`, `settings`, `notifications`, `ai`)
-is still open - see [PRD.md](./PRD.md#testing-requirements) for the target.
+`bills` (VTpass purchase success/rejection/ambiguous-error handling),
+`subscriptions` (subscribe/extend/renewal-lapse logic), `referrals`
+(pending/completed/void payout gating), `notifications`, `otp` (including the
+`OTP_BYPASS` dev path), and `users` (KYC bank-change gating, referral code
+generation). Expanding coverage to the remaining controllers/services
+(`admin`, `settings`, `ai`) is still open - see
+[PRD.md](./PRD.md#testing-requirements) for the target.
 
 ## Database Migrations
 
@@ -348,6 +380,9 @@ See [PRD.md](./PRD.md#known-limitations) for the original PRD's list
 - No automatic reconciliation job for ambiguous wallet withdrawal/bill-purchase failures (network errors, timeouts) - they're left `pending` for manual review rather than auto-resolved via VTpass's `/requery` or a Paystack transfer status check.
 - VTpass amounts are assumed to be naira (not kobo, unlike Paystack) - unverified against a real sandbox call; confirm before enabling in production.
 - No "runner default" / dispute resolution flow - once a runner accepts an errand, the requester can no longer cancel it through the API at all, even if the runner abandons or fails to complete it. Handling that case today requires manual intervention (e.g. directly in the database); a proper admin-mediated force-cancel/refund path is a good next addition.
+- No multi-runner errand fulfillment - `requiredRunners` on an errand is only a Pro priority-access qualifying signal; only one runner can ultimately accept and complete any given errand, same as before. Actually letting several runners split/fulfill one errand would need reworking acceptance, completion, and per-runner payout.
+- Pro auto-renewal has no grace period - if the wallet can't cover a renewal charge, Pro lapses immediately with no retry window. The renewal sweep itself runs hourly (`@nestjs/schedule`), so there's up to an hour of delay between actual expiry and the lapse being processed.
+- A voided referral (referrer wasn't Pro at the moment their referred user's first errand completed) is forfeited permanently - there's no path to retroactively pay it out if the referrer resubscribes later.
 
 ## License
 

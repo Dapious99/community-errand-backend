@@ -199,3 +199,106 @@ describe("OtpService", () => {
     ).rejects.toThrow("Too many incorrect attempts. Request a new code.");
   });
 });
+
+describe("OtpService with OTP_BYPASS enabled", () => {
+  let service: OtpService;
+  let redisService: jest.Mocked<RedisService>;
+  let mailService: jest.Mocked<MailService>;
+
+  const buildService = async (nodeEnv = "development") => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        OtpService,
+        {
+          provide: RedisService,
+          useValue: {
+            set: jest.fn(),
+            get: jest.fn(),
+            del: jest.fn(),
+            incr: jest.fn(),
+          },
+        },
+        {
+          provide: MailService,
+          useValue: { send: jest.fn().mockResolvedValue(undefined) },
+        },
+        {
+          provide: ConfigService,
+          useValue: {
+            get: jest.fn((key: string, fallback?: any) => {
+              if (key === "OTP_BYPASS") return true;
+              if (key === "NODE_ENV") return nodeEnv;
+              return fallback;
+            }),
+          },
+        },
+      ],
+    }).compile();
+
+    return {
+      service: module.get(OtpService),
+      redisService: module.get(RedisService) as jest.Mocked<RedisService>,
+      mailService: module.get(MailService) as jest.Mocked<MailService>,
+    };
+  };
+
+  beforeEach(async () => {
+    const built = await buildService();
+    service = built.service;
+    redisService = built.redisService;
+    mailService = built.mailService;
+  });
+
+  it("refuses to construct when NODE_ENV is production", async () => {
+    await expect(buildService("production")).rejects.toThrow(
+      "OTP_BYPASS must not be enabled in production"
+    );
+  });
+
+  it("never touches Redis or Mail", async () => {
+    await service.request(
+      OtpPurpose.SIGNUP_VERIFICATION,
+      "user-1",
+      "user@example.com"
+    );
+
+    expect(redisService.set).not.toHaveBeenCalled();
+    expect(mailService.send).not.toHaveBeenCalled();
+  });
+
+  it("still verifies correctly and round-trips metadata, entirely in memory", async () => {
+    const logSpy = jest.spyOn((service as any).logger, "warn");
+
+    await service.request(
+      OtpPurpose.BANK_CHANGE,
+      "user-1",
+      "user@example.com",
+      { pendingChanges: { bankName: "GTBank" } }
+    );
+
+    const logged: string = logSpy.mock.calls
+      .map((args) => args[0] as string)
+      .find((msg: string) => msg.includes("[OTP BYPASS]"));
+    expect(logged).toBeDefined();
+    const code = logged.match(/(\d{6})/)[1];
+
+    const metadata = await service.verify(
+      OtpPurpose.BANK_CHANGE,
+      "user-1",
+      code
+    );
+    expect(metadata).toEqual({ pendingChanges: { bankName: "GTBank" } });
+  });
+
+  it("still rejects an incorrect code", async () => {
+    await service.request(
+      OtpPurpose.NEW_DEVICE_LOGIN,
+      "user-1",
+      "user@example.com"
+    );
+
+    await expect(
+      service.verify(OtpPurpose.NEW_DEVICE_LOGIN, "user-1", "000000000")
+    ).rejects.toThrow(BadRequestException);
+  });
+});

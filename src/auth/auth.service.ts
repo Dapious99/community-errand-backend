@@ -20,6 +20,7 @@ import { ConfirmDeviceDto } from "./dto/confirm-device.dto";
 import { OtpService } from "../otp/otp.service";
 import { OtpPurpose } from "../otp/otp-purpose.enum";
 import { TrustedDevice } from "./entities/trusted-device.entity";
+import { ReferralsService } from "../referrals/referrals.service";
 
 @Injectable()
 export class AuthService {
@@ -30,6 +31,7 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
     private otpService: OtpService,
+    private referralsService: ReferralsService,
     @InjectRepository(TrustedDevice)
     private trustedDevicesRepository: Repository<TrustedDevice>
   ) {}
@@ -40,6 +42,19 @@ export class AuthService {
 
     if (deviceId) {
       await this.trustDevice(user.id, deviceId);
+    }
+
+    if (user.referredByUserId) {
+      try {
+        await this.referralsService.createPending(
+          user.referredByUserId,
+          user.id
+        );
+      } catch (error: any) {
+        this.logger.warn(
+          `Failed to record referral for new user ${user.id}: ${error.message}`
+        );
+      }
     }
 
     try {
@@ -63,6 +78,7 @@ export class AuthService {
         name: user.name,
         role: user.role,
         verified: user.verified,
+        referralCode: user.referralCode,
       },
       ...tokens,
     };

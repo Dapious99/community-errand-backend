@@ -2,6 +2,7 @@ import { Module } from "@nestjs/common";
 import { ConfigModule, ConfigService } from "@nestjs/config";
 import { TypeOrmModule } from "@nestjs/typeorm";
 import { EventEmitterModule } from "@nestjs/event-emitter";
+import { ScheduleModule } from "@nestjs/schedule";
 import { getDatabaseConfig } from "./config/database.config";
 import { AppController } from "./app.controller";
 import { AppService } from "./app.service";
@@ -19,6 +20,8 @@ import { NotificationsModule } from "./notifications/notifications.module";
 import { AiModule } from "./ai/ai.module";
 import { WalletModule } from "./wallet/wallet.module";
 import { BillsModule } from "./bills/bills.module";
+import { SubscriptionsModule } from "./subscriptions/subscriptions.module";
+import { ReferralsModule } from "./referrals/referrals.module";
 
 @Module({
   imports: [
@@ -27,6 +30,7 @@ import { BillsModule } from "./bills/bills.module";
       envFilePath: ".env",
     }),
     EventEmitterModule.forRoot(),
+    ScheduleModule.forRoot(),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: getDatabaseConfig,
@@ -46,6 +50,8 @@ import { BillsModule } from "./bills/bills.module";
     AiModule,
     WalletModule,
     BillsModule,
+    SubscriptionsModule,
+    ReferralsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

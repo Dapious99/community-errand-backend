@@ -44,4 +44,13 @@ export class CreateUserDto {
   @IsOptional()
   @IsString()
   deviceId?: string;
+
+  @ApiPropertyOptional({
+    example: "CEL7K@3B",
+    description:
+      "Another user's referral code, if they were referred. Invalid/unknown codes are silently ignored - registration never fails because of this field.",
+  })
+  @IsOptional()
+  @IsString()
+  referralCode?: string;
 }

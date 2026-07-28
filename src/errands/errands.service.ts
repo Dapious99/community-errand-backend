@@ -22,6 +22,9 @@ import { AiService } from "../ai/ai.service";
 import { NotificationsService } from "../notifications/notifications.service";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
+import { UsersService } from "../users/users.service";
+import { isProUser } from "../users/utils/is-pro-user";
+import { ReferralsService } from "../referrals/referrals.service";
 
 @Injectable()
 export class ErrandsService {
@@ -38,7 +41,9 @@ export class ErrandsService {
     private settingsService: SettingsService,
     private aiService: AiService,
     private notificationsService: NotificationsService,
-    private walletService: WalletService
+    private walletService: WalletService,
+    private usersService: UsersService,
+    private referralsService: ReferralsService
   ) {}
 
   async create(
@@ -50,6 +55,7 @@ export class ErrandsService {
   > {
     const { locations, mediaAttachments, isBoosted, ...errandData } =
       createErrandDto;
+    const requiredRunners = errandData.requiredRunners ?? 1;
 
     // Debit the requester's wallet before creating anything - if they can't
     // afford it, nothing gets created at all. There's no errand row yet at
@@ -61,10 +67,28 @@ export class ErrandsService {
       { description: `Payment for errand "${errandData.title}"` }
     );
 
+    // Pro perk: high-value or multi-runner errands get a priority window
+    // where only Pro runners can see/accept them (see findAll/acceptErrand).
+    const priorityThreshold = await this.settingsService.get<number>(
+      "pro_priority_price_threshold_ngn",
+      20000
+    );
+    const priorityWindowMinutes = await this.settingsService.get<number>(
+      "pro_priority_window_minutes",
+      30
+    );
+    const isPriorityErrand =
+      errandData.price >= priorityThreshold || requiredRunners > 1;
+    const priorityUntil = isPriorityErrand
+      ? new Date(Date.now() + priorityWindowMinutes * 60 * 1000)
+      : undefined;
+
     let savedErrand: Errand;
     try {
       const errand = this.errandsRepository.create({
         ...errandData,
+        requiredRunners,
+        priorityUntil,
         requesterId: userId,
         status: ErrandStatus.OPEN,
       });
@@ -108,6 +132,27 @@ export class ErrandsService {
     const result: Errand & {
       boostPayment?: { authorizationUrl: string; reference: string };
     } = await this.findOne(savedErrand.id);
+
+    // Pro perk: every new errand (not just boosted ones - that's the
+    // differentiator) proactively notifies nearby Pro runners.
+    try {
+      const pickup = result.locations?.find(
+        (l) => l.type === LocationType.PICKUP
+      );
+      if (pickup?.latitude != null && pickup?.longitude != null) {
+        await this.notificationsService.notifyNearbyProUsers({
+          latitude: pickup.latitude,
+          longitude: pickup.longitude,
+          title: "New errand nearby!",
+          body: result.title,
+          data: { errandId: savedErrand.id },
+        });
+      }
+    } catch (error: any) {
+      this.logger.warn(
+        `Pro-user notification fan-out failed for errand ${savedErrand.id}: ${error.message}`
+      );
+    }
 
     if (isBoosted) {
       try {
@@ -187,7 +232,8 @@ export class ErrandsService {
   }
 
   async findAll(
-    filterDto: FilterErrandsDto
+    filterDto: FilterErrandsDto,
+    userId: string
   ): Promise<{ data: Errand[]; total: number; page: number; limit: number }> {
     const { page = 1, limit = 20, ...filters } = filterDto;
     const skip = (page - 1) * limit;
@@ -200,6 +246,16 @@ export class ErrandsService {
       .leftJoinAndSelect("errand.runner", "runner")
       .leftJoinAndSelect("errand.locations", "locations")
       .leftJoinAndSelect("errand.mediaAttachments", "mediaAttachments");
+
+    // Pro perk: non-Pro users don't see priority-window errands (high-value
+    // or multi-runner) until the window passes.
+    const requestingUser = await this.usersService.findOne(userId);
+    if (!isProUser(requestingUser)) {
+      queryBuilder.andWhere(
+        "(errand.priorityUntil IS NULL OR errand.priorityUntil <= :now)",
+        { now: new Date() }
+      );
+    }
 
     if (filters.category) {
       queryBuilder.andWhere("errand.category = :category", {
@@ -310,6 +366,18 @@ export class ErrandsService {
       throw new ForbiddenException("Only runners can accept errands");
     }
 
+    // Defense in depth for the Pro priority-access perk: findAll() already
+    // hides these from non-Pro users, but a direct accept call (from a
+    // shared link, a stale client cache, etc.) must be blocked too.
+    if (errand.priorityUntil && errand.priorityUntil.getTime() > Date.now()) {
+      const runner = await this.usersService.findOne(userId);
+      if (!isProUser(runner)) {
+        throw new ForbiddenException(
+          "This errand is in its priority window for Pro users."
+        );
+      }
+    }
+
     // Atomic, conditional on the DB row still being OPEN: if two runners hit
     // this at the same time, only the first UPDATE's WHERE clause matches -
     // the second sees 0 affected rows instead of silently overwriting the
@@ -370,9 +438,33 @@ export class ErrandsService {
           `Failed to process payout for errand ${savedErrand.id}: ${error.message}`
         );
       }
+
+      try {
+        await this.maybeCompleteReferral(savedErrand.requesterId);
+        if (savedErrand.runnerId) {
+          await this.maybeCompleteReferral(savedErrand.runnerId);
+        }
+      } catch (error: any) {
+        this.logger.error(
+          `Referral completion check failed for errand ${savedErrand.id}: ${error.message}`
+        );
+      }
     }
 
     return savedErrand;
+  }
+
+  /** Only pays out a pending referral on the referred user's first-ever completed errand (either side). */
+  private async maybeCompleteReferral(userId: string): Promise<void> {
+    const completedCount = await this.errandsRepository.count({
+      where: [
+        { requesterId: userId, status: ErrandStatus.COMPLETED },
+        { runnerId: userId, status: ErrandStatus.COMPLETED },
+      ],
+    });
+    if (completedCount === 1) {
+      await this.referralsService.completeIfPending(userId);
+    }
   }
 
   /**
