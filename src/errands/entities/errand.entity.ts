@@ -18,6 +18,9 @@ import { DecimalColumnTransformer } from "../../common/transformers/decimal.tran
 
 export enum ErrandStatus {
   OPEN = "open",
+  // Set automatically once a runner applies - not settable directly through
+  // PATCH /:id/status (see ErrandsService.updateStatus).
+  PENDING = "pending",
   ACCEPTED = "accepted",
   IN_PROGRESS = "in_progress",
   COMPLETED = "completed",

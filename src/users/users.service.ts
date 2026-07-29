@@ -16,6 +16,7 @@ import { RatingsService } from "../ratings/ratings.service";
 import { OtpService } from "../otp/otp.service";
 import { OtpPurpose } from "../otp/otp-purpose.enum";
 import { generateReferralCodeCandidate } from "./utils/referral-code";
+import { DojahService } from "./services/dojah.service";
 
 @Injectable()
 export class UsersService {
@@ -25,20 +26,26 @@ export class UsersService {
     @InjectRepository(KYC)
     private kycRepository: Repository<KYC>,
     private ratingsService: RatingsService,
-    private otpService: OtpService
+    private otpService: OtpService,
+    private dojahService: DojahService
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
-    const { email, phone, password, referralCode, ...rest } = createUserDto;
+    const { email, phone, username, password, referralCode, role, ...rest } =
+      createUserDto;
 
     // Check if user exists
     const existingUser = await this.usersRepository.findOne({
-      where: [{ email }, ...(phone ? [{ phone }] : [])],
+      where: [
+        { email },
+        ...(phone ? [{ phone }] : []),
+        ...(username ? [{ username }] : []),
+      ],
     });
 
     if (existingUser) {
       throw new ConflictException(
-        "User with this email or phone already exists"
+        "User with this email, phone, or username already exists"
       );
     }
 
@@ -55,8 +62,11 @@ export class UsersService {
       ...rest,
       email,
       phone,
+      username,
       passwordHash,
-      role: rest.role || UserRole.REQUESTER,
+      // Every new account can act as both requester and runner - `role` is
+      // still accepted on the DTO for backward compatibility but ignored.
+      role: UserRole.BOTH,
       referralCode: await this.generateUniqueReferralCode(),
       referredByUserId: referrer?.id,
     });
@@ -81,6 +91,29 @@ export class UsersService {
     return this.usersRepository.findOne({ where: { email } });
   }
 
+  /**
+   * Safe-to-share subset of a user's profile for viewing by OTHER users
+   * (e.g. a requester reviewing an applicant) - deliberately excludes email,
+   * phone, and every demographic/identity field (dob, religion, marital
+   * status, address, emergency contact, KYC, etc).
+   */
+  toPublicProfile(user: User) {
+    return {
+      id: user.id,
+      name: user.name,
+      avatarUrl: user.avatarUrl,
+      ratingAvg: user.ratingAvg,
+      verified: user.verified,
+      role: user.role,
+      memberSince: user.createdAt,
+    };
+  }
+
+  async getPublicProfile(id: string) {
+    const user = await this.findOne(id);
+    return this.toPublicProfile(user);
+  }
+
   async findByReferralCode(code: string): Promise<User | null> {
     return this.usersRepository.findOne({ where: { referralCode: code } });
   }
@@ -102,6 +135,24 @@ export class UsersService {
 
   async update(id: string, updateUserDto: UpdateUserDto): Promise<User> {
     const user = await this.findOne(id);
+
+    if (updateUserDto.phone && updateUserDto.phone !== user.phone) {
+      const existing = await this.usersRepository.findOne({
+        where: { phone: updateUserDto.phone },
+      });
+      if (existing && existing.id !== id) {
+        throw new ConflictException("Phone number already in use");
+      }
+    }
+
+    if (updateUserDto.role && updateUserDto.role !== user.role) {
+      if (user.roleChangedAt) {
+        throw new ConflictException(
+          "Your role can only be changed once - contact support if you need it changed again."
+        );
+      }
+      user.roleChangedAt = new Date();
+    }
 
     Object.assign(user, updateUserDto);
     return this.usersRepository.save(user);
@@ -147,8 +198,26 @@ export class UsersService {
       };
     }
 
+    // Only re-verify with Dojah when the nin/bvn value is actually new -
+    // re-submitting unrelated fields (e.g. re-uploading an ID photo)
+    // shouldn't refire a paid lookup for a value that was already checked.
+    const ninChanged = !kyc || kyc.nin !== createKycDto.nin;
+    const bvnChanged = !!createKycDto.bvn && (!kyc || kyc.bvn !== createKycDto.bvn);
+
+    const verification: Partial<KYC> = {};
+    if (ninChanged) {
+      const result = await this.dojahService.verifyNin(createKycDto.nin);
+      verification.ninVerificationData = result.data ?? { error: result.error };
+      if (result.verified) verification.ninVerifiedAt = new Date();
+    }
+    if (bvnChanged && createKycDto.bvn) {
+      const result = await this.dojahService.verifyBvn(createKycDto.bvn);
+      verification.bvnVerificationData = result.data ?? { error: result.error };
+      if (result.verified) verification.bvnVerifiedAt = new Date();
+    }
+
     if (kyc) {
-      Object.assign(kyc, createKycDto, {
+      Object.assign(kyc, createKycDto, verification, {
         // A non-bank edit to an already-approved KYC (e.g. re-uploading the ID
         // card) doesn't need to go back through review.
         status:
@@ -158,6 +227,7 @@ export class UsersService {
     }
 
     const newKyc = this.kycRepository.create({
+      ...verification,
       ...createKycDto,
       userId,
       status: KYCStatus.PENDING,

@@ -9,6 +9,10 @@ import { ErrandsService } from "./errands.service";
 import { Errand, ErrandStatus } from "./entities/errand.entity";
 import { Location, LocationType } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
+import {
+  ErrandApplication,
+  ErrandApplicationStatus,
+} from "./entities/errand-application.entity";
 import { UserRole } from "../users/entities/user.entity";
 import { PaymentsService } from "../payments/payments.service";
 import { SettingsService } from "../settings/settings.service";
@@ -31,6 +35,7 @@ describe("ErrandsService", () => {
   let referralsService: jest.Mocked<ReferralsService>;
   let updateExecute: jest.Mock;
   let queryBuilder: any;
+  let applicationsRepo: any;
 
   beforeEach(async () => {
     updateExecute = jest.fn().mockResolvedValue({ affected: 1 });
@@ -72,6 +77,17 @@ describe("ErrandsService", () => {
           useValue: { create: jest.fn((data) => data), save: jest.fn() },
         },
         {
+          provide: getRepositoryToken(ErrandApplication),
+          useValue: {
+            create: jest.fn((data) => ({ id: "application-1", ...data })),
+            save: jest.fn((data) => Promise.resolve({ ...data })),
+            find: jest.fn().mockResolvedValue([]),
+            findOne: jest.fn(),
+            update: jest.fn().mockResolvedValue(undefined),
+            count: jest.fn().mockResolvedValue(0),
+          },
+        },
+        {
           provide: PaymentsService,
           useValue: {
             processPayout: jest.fn().mockResolvedValue(null),
@@ -110,6 +126,7 @@ describe("ErrandsService", () => {
             findOne: jest
               .fn()
               .mockResolvedValue({ id: "user-1", proExpiresAt: null }),
+            toPublicProfile: jest.fn((u) => ({ id: u?.id, name: u?.name })),
           },
         },
         {
@@ -123,6 +140,7 @@ describe("ErrandsService", () => {
 
     service = module.get(ErrandsService);
     errandsRepo = module.get(getRepositoryToken(Errand));
+    applicationsRepo = module.get(getRepositoryToken(ErrandApplication));
     paymentsService = module.get(PaymentsService);
     settingsService = module.get(SettingsService);
     aiService = module.get(AiService);
@@ -403,6 +421,27 @@ describe("ErrandsService", () => {
         expect.any(Object)
       );
     });
+
+    it("hides the caller's own errands when browsing open errands", async () => {
+      await service.findAll({ status: ErrandStatus.OPEN } as any, "user-1");
+
+      expect(queryBuilder.where).toHaveBeenCalledWith(
+        "errand.requesterId != :userId",
+        { userId: "user-1" }
+      );
+    });
+
+    it("does not hide the caller's own errands for other status filters", async () => {
+      await service.findAll({ status: ErrandStatus.COMPLETED } as any, "user-1");
+
+      expect(queryBuilder.where).not.toHaveBeenCalled();
+    });
+
+    it("does not hide the caller's own errands when no status filter is given", async () => {
+      await service.findAll({} as any, "user-1");
+
+      expect(queryBuilder.where).not.toHaveBeenCalled();
+    });
   });
 
   describe("acceptErrand", () => {
@@ -531,6 +570,252 @@ describe("ErrandsService", () => {
     });
   });
 
+  describe("applyToErrand", () => {
+    const openErrand = {
+      id: "errand-1",
+      status: ErrandStatus.OPEN,
+      requesterId: "requester-1",
+    };
+
+    it("rejects the requester applying to their own errand", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+
+      await expect(
+        service.applyToErrand("errand-1", "requester-1", UserRole.BOTH)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a REQUESTER-only role", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.REQUESTER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects applying twice to the same errand", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+      applicationsRepo.findOne.mockResolvedValue({ id: "existing-application" });
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it("rejects applying once the errand is no longer OPEN/PENDING", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        ...openErrand,
+        status: ErrandStatus.ACCEPTED,
+      });
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("creates a PENDING application and flips an OPEN errand to PENDING", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+      applicationsRepo.findOne.mockResolvedValue(null);
+
+      const result = await service.applyToErrand(
+        "errand-1",
+        "runner-1",
+        UserRole.RUNNER,
+        "I can do this now"
+      );
+
+      expect(result.status).toBe(ErrandApplicationStatus.PENDING);
+      expect(errandsRepo.update).toHaveBeenCalledWith("errand-1", {
+        status: ErrandStatus.PENDING,
+      });
+    });
+
+    it("does not re-flip an already-PENDING errand to PENDING again", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        ...openErrand,
+        status: ErrandStatus.PENDING,
+      });
+      applicationsRepo.findOne.mockResolvedValue(null);
+
+      await service.applyToErrand("errand-1", "runner-2", UserRole.RUNNER);
+
+      expect(errandsRepo.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("getApplications", () => {
+    it("returns every applicant, scrubbed to a public profile, for the requester", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+      });
+      applicationsRepo.find.mockResolvedValue([
+        {
+          id: "application-1",
+          errandId: "errand-1",
+          status: ErrandApplicationStatus.PENDING,
+          runner: { id: "runner-1", name: "Runner One", email: "leak@example.com" },
+        },
+      ]);
+
+      const result = await service.getApplications("errand-1", "requester-1");
+
+      expect(applicationsRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { errandId: "errand-1" } })
+      );
+      expect(result[0].runner).not.toHaveProperty("email");
+      expect(result[0].runner).toEqual({ id: "runner-1", name: "Runner One" });
+    });
+
+    it("scopes to only the caller's own application for a non-requester", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+      });
+      applicationsRepo.find.mockResolvedValue([]);
+
+      await service.getApplications("errand-1", "runner-1");
+
+      expect(applicationsRepo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { errandId: "errand-1", runnerId: "runner-1" },
+        })
+      );
+    });
+  });
+
+  describe("acceptApplication", () => {
+    it("rejects anyone but the requester", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+
+      await expect(
+        service.acceptApplication("errand-1", "application-1", "someone-else")
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects accepting an application that's already been decided", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+      applicationsRepo.findOne.mockResolvedValue({
+        id: "application-1",
+        status: ErrandApplicationStatus.DECLINED,
+      });
+
+      await expect(
+        service.acceptApplication("errand-1", "application-1", "requester-1")
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it("accepts the application, assigns the runner, and declines the rest", async () => {
+      errandsRepo.findOne
+        .mockResolvedValueOnce({
+          id: "errand-1",
+          requesterId: "requester-1",
+          status: ErrandStatus.PENDING,
+        })
+        .mockResolvedValueOnce({
+          id: "errand-1",
+          status: ErrandStatus.ACCEPTED,
+          runnerId: "runner-1",
+        });
+      applicationsRepo.findOne.mockResolvedValue({
+        id: "application-1",
+        runnerId: "runner-1",
+        status: ErrandApplicationStatus.PENDING,
+      });
+
+      const result = await service.acceptApplication(
+        "errand-1",
+        "application-1",
+        "requester-1"
+      );
+
+      expect(result.status).toBe(ErrandStatus.ACCEPTED);
+      expect(applicationsRepo.update).toHaveBeenCalledWith("application-1", {
+        status: ErrandApplicationStatus.ACCEPTED,
+      });
+      expect(applicationsRepo.update).toHaveBeenCalledWith(
+        { errandId: "errand-1", status: ErrandApplicationStatus.PENDING },
+        { status: ErrandApplicationStatus.DECLINED }
+      );
+    });
+
+    it("throws ConflictException if the errand was accepted concurrently", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+      applicationsRepo.findOne.mockResolvedValue({
+        id: "application-1",
+        runnerId: "runner-1",
+        status: ErrandApplicationStatus.PENDING,
+      });
+      updateExecute.mockResolvedValue({ affected: 0 });
+
+      await expect(
+        service.acceptApplication("errand-1", "application-1", "requester-1")
+      ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe("declineApplication", () => {
+    it("rejects anyone but the requester", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+
+      await expect(
+        service.declineApplication("errand-1", "application-1", "someone-else")
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("reverts the errand to OPEN when the last pending application is declined", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+      applicationsRepo.findOne.mockResolvedValue({
+        id: "application-1",
+        status: ErrandApplicationStatus.PENDING,
+      });
+      applicationsRepo.count.mockResolvedValue(0);
+
+      await service.declineApplication("errand-1", "application-1", "requester-1");
+
+      expect(errandsRepo.update).toHaveBeenCalledWith("errand-1", {
+        status: ErrandStatus.OPEN,
+      });
+    });
+
+    it("keeps the errand PENDING when other applications are still pending", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        requesterId: "requester-1",
+        status: ErrandStatus.PENDING,
+      });
+      applicationsRepo.findOne.mockResolvedValue({
+        id: "application-1",
+        status: ErrandApplicationStatus.PENDING,
+      });
+      applicationsRepo.count.mockResolvedValue(2);
+
+      await service.declineApplication("errand-1", "application-1", "requester-1");
+
+      expect(errandsRepo.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe("updateStatus", () => {
     const inProgressErrand = {
       id: "errand-1",
@@ -549,6 +834,18 @@ describe("ErrandsService", () => {
           "stranger"
         )
       ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects setting PENDING manually - it's only set automatically on apply", async () => {
+      errandsRepo.findOne.mockResolvedValue(inProgressErrand);
+
+      await expect(
+        service.updateStatus(
+          "errand-1",
+          { status: ErrandStatus.PENDING },
+          "requester-1"
+        )
+      ).rejects.toThrow(BadRequestException);
     });
 
     it("rejects completing an errand that is not IN_PROGRESS", async () => {
@@ -699,6 +996,25 @@ describe("ErrandsService", () => {
 
       await service.cancel("errand-1", "requester-1");
 
+      expect(errandsRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ status: ErrandStatus.CANCELLED })
+      );
+      expect(paymentsService.processRefund).toHaveBeenCalledWith("errand-1");
+    });
+
+    it("cancels a PENDING errand, declining any pending applications, and refunds", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        status: ErrandStatus.PENDING,
+        requesterId: "requester-1",
+      });
+
+      await service.cancel("errand-1", "requester-1");
+
+      expect(applicationsRepo.update).toHaveBeenCalledWith(
+        { errandId: "errand-1", status: ErrandApplicationStatus.PENDING },
+        { status: ErrandApplicationStatus.DECLINED }
+      );
       expect(errandsRepo.save).toHaveBeenCalledWith(
         expect.objectContaining({ status: ErrandStatus.CANCELLED })
       );

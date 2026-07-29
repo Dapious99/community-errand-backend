@@ -100,4 +100,13 @@ export class UsersController {
   async getUserRatings(@Param("id") id: string) {
     return this.usersService.getUserRatings(id);
   }
+
+  @Get(":id/public-profile")
+  @ApiOperation({
+    summary:
+      "Get another user's public profile (name, avatar, rating) - used e.g. when a requester reviews an applicant",
+  })
+  async getPublicProfile(@Param("id") id: string) {
+    return this.usersService.getPublicProfile(id);
+  }
 }

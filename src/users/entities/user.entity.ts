@@ -34,6 +34,10 @@ export class User {
   @Index()
   phone?: string;
 
+  @Column({ unique: true, nullable: true })
+  @Index()
+  username?: string;
+
   @Column()
   name: string;
 
@@ -44,9 +48,15 @@ export class User {
   @Column({
     type: "enum",
     enum: UserRole,
-    default: UserRole.REQUESTER,
+    default: UserRole.BOTH,
   })
   role: UserRole;
+
+  // Set the first (and only) time a user changes `role` away from its
+  // register-time default - see UsersService.update, which rejects further
+  // changes once this is set.
+  @Column({ type: "timestamp", nullable: true })
+  roleChangedAt?: Date;
 
   @Column({ default: false })
   verified: boolean;
@@ -90,6 +100,41 @@ export class User {
 
   @Column({ nullable: true })
   referredByUserId?: string;
+
+  // Additional profile detail, all optional - collected via profile edit,
+  // not at signup.
+  @Column({ type: "date", nullable: true })
+  dateOfBirth?: string;
+
+  @Column({ nullable: true })
+  gender?: string;
+
+  @Column({ nullable: true })
+  maritalStatus?: string;
+
+  @Column({ nullable: true })
+  religion?: string;
+
+  @Column({ nullable: true })
+  address?: string;
+
+  @Column({ nullable: true })
+  state?: string;
+
+  @Column({ nullable: true })
+  city?: string;
+
+  @Column({ nullable: true })
+  occupation?: string;
+
+  @Column({ nullable: true })
+  employer?: string;
+
+  @Column({ nullable: true })
+  emergencyContactName?: string;
+
+  @Column({ nullable: true })
+  emergencyContactPhone?: string;
 
   @CreateDateColumn()
   createdAt: Date;

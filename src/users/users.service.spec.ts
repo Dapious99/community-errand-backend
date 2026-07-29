@@ -1,16 +1,24 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { getRepositoryToken } from "@nestjs/typeorm";
+import { ConflictException } from "@nestjs/common";
 import { UsersService } from "./users.service";
 import { User } from "./entities/user.entity";
 import { KYC, KYCStatus } from "./entities/kyc.entity";
 import { RatingsService } from "../ratings/ratings.service";
 import { OtpService } from "../otp/otp.service";
+import { DojahService } from "./services/dojah.service";
 
 describe("UsersService", () => {
   let service: UsersService;
   let usersRepo: any;
   let kycRepo: any;
   let otpService: jest.Mocked<OtpService>;
+  let dojahService: jest.Mocked<DojahService>;
+
+  const kycDto = {
+    nin: "12345678901",
+    ninImageUrl: "https://example.com/nin.jpg",
+  };
 
   const user = { id: "user-1", email: "user@example.com" };
 
@@ -43,6 +51,13 @@ describe("UsersService", () => {
             resend: jest.fn().mockResolvedValue(undefined),
           },
         },
+        {
+          provide: DojahService,
+          useValue: {
+            verifyNin: jest.fn().mockResolvedValue({ verified: true, data: {} }),
+            verifyBvn: jest.fn().mockResolvedValue({ verified: true, data: {} }),
+          },
+        },
       ],
     }).compile();
 
@@ -50,6 +65,7 @@ describe("UsersService", () => {
     usersRepo = module.get(getRepositoryToken(User));
     kycRepo = module.get(getRepositoryToken(KYC));
     otpService = module.get(OtpService);
+    dojahService = module.get(DojahService);
   });
 
   describe("create", () => {
@@ -101,12 +117,14 @@ describe("UsersService", () => {
       kycRepo.findOne.mockResolvedValue(null);
 
       const result: any = await service.submitKyc(user.id, {
+        ...kycDto,
         bankAccountNumber: "0123456789",
         bankName: "Access Bank",
       });
 
       expect(result.status).toBe(KYCStatus.PENDING);
       expect(otpService.request).not.toHaveBeenCalled();
+      expect(dojahService.verifyNin).toHaveBeenCalledWith(kycDto.nin);
     });
 
     it("re-submitting a REJECTED KYC applies changes directly and resets to PENDING", async () => {
@@ -118,6 +136,7 @@ describe("UsersService", () => {
       });
 
       const result: any = await service.submitKyc(user.id, {
+        ...kycDto,
         bankAccountNumber: "222",
         bankName: "New Bank",
       });
@@ -136,6 +155,7 @@ describe("UsersService", () => {
       });
 
       const result: any = await service.submitKyc(user.id, {
+        ...kycDto,
         bankAccountNumber: "999",
         bankName: "Old Bank",
       });
@@ -159,6 +179,7 @@ describe("UsersService", () => {
       });
 
       const result: any = await service.submitKyc(user.id, {
+        ...kycDto,
         idCardUrl: "https://example.com/new-id.jpg",
       });
 
@@ -205,6 +226,58 @@ describe("UsersService", () => {
 
       expect(result.bankAccountNumber).toBe("999");
       expect(result.status).toBe(KYCStatus.PENDING);
+    });
+  });
+
+  describe("update", () => {
+    it("allows the first role change and stamps roleChangedAt", async () => {
+      usersRepo.findOne.mockResolvedValueOnce({
+        ...user,
+        role: "both",
+        roleChangedAt: null,
+      });
+
+      const result: any = await service.update(user.id, { role: "runner" } as any);
+
+      expect(result.role).toBe("runner");
+      expect(result.roleChangedAt).toBeInstanceOf(Date);
+    });
+
+    it("rejects a second role change", async () => {
+      usersRepo.findOne.mockResolvedValueOnce({
+        ...user,
+        role: "runner",
+        roleChangedAt: new Date("2024-01-01"),
+      });
+
+      await expect(
+        service.update(user.id, { role: "requester" } as any)
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it("allows saving without touching role when it's unchanged", async () => {
+      usersRepo.findOne.mockResolvedValueOnce({
+        ...user,
+        role: "both",
+        roleChangedAt: new Date("2024-01-01"),
+      });
+
+      const result: any = await service.update(user.id, {
+        role: "both",
+        name: "New Name",
+      } as any);
+
+      expect(result.name).toBe("New Name");
+    });
+
+    it("rejects a phone number already used by another account", async () => {
+      usersRepo.findOne
+        .mockResolvedValueOnce({ ...user, phone: "+2348011111111" }) // this.findOne(id)
+        .mockResolvedValueOnce({ id: "other-user", phone: "+2348022222222" }); // conflict check
+
+      await expect(
+        service.update(user.id, { phone: "+2348022222222" } as any)
+      ).rejects.toThrow(ConflictException);
     });
   });
 });

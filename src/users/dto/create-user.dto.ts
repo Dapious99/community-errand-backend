@@ -27,12 +27,25 @@ export class CreateUserDto {
   @MinLength(2)
   name: string;
 
+  @ApiProperty({ example: "johndoe123" })
+  @IsString()
+  @MinLength(3)
+  @Matches(/^[a-zA-Z0-9_]+$/, {
+    message: "Username may only contain letters, numbers, and underscores",
+  })
+  username: string;
+
   @ApiProperty({ example: "password123", minLength: 6 })
   @IsString()
   @MinLength(6)
   password: string;
 
-  @ApiPropertyOptional({ enum: UserRole, default: UserRole.REQUESTER })
+  @ApiPropertyOptional({
+    enum: UserRole,
+    deprecated: true,
+    description:
+      "Ignored - every new account is created with role BOTH. Kept optional so older clients that still send it aren't rejected.",
+  })
   @IsOptional()
   @IsEnum(UserRole)
   role?: UserRole;

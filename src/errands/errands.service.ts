@@ -12,6 +12,10 @@ import { OnEvent } from "@nestjs/event-emitter";
 import { Errand, ErrandStatus } from "./entities/errand.entity";
 import { Location, LocationType } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
+import {
+  ErrandApplication,
+  ErrandApplicationStatus,
+} from "./entities/errand-application.entity";
 import { CreateErrandDto } from "./dto/create-errand.dto";
 import { UpdateErrandStatusDto } from "./dto/update-errand-status.dto";
 import { FilterErrandsDto } from "./dto/filter-errands.dto";
@@ -37,6 +41,8 @@ export class ErrandsService {
     private locationsRepository: Repository<Location>,
     @InjectRepository(MediaAttachment)
     private mediaAttachmentsRepository: Repository<MediaAttachment>,
+    @InjectRepository(ErrandApplication)
+    private errandApplicationsRepository: Repository<ErrandApplication>,
     private paymentsService: PaymentsService,
     private settingsService: SettingsService,
     private aiService: AiService,
@@ -247,6 +253,15 @@ export class ErrandsService {
       .leftJoinAndSelect("errand.locations", "locations")
       .leftJoinAndSelect("errand.mediaAttachments", "mediaAttachments");
 
+    // Only hide the requester's own errand from the browse feed when they're
+    // looking at "open" errands specifically - that's the actionable list
+    // for picking up work, and you can't pick up your own. Other status
+    // filters are just a general listing, so a requester's own errand stays
+    // visible there.
+    if (filters.status === ErrandStatus.OPEN) {
+      queryBuilder.where("errand.requesterId != :userId", { userId });
+    }
+
     // Pro perk: non-Pro users don't see priority-window errands (high-value
     // or multi-runner) until the window passes.
     const requestingUser = await this.usersService.findOne(userId);
@@ -403,6 +418,210 @@ export class ErrandsService {
     return this.findOne(id);
   }
 
+  /**
+   * A runner "bids" on an open (or already-bidding, i.e. pending) errand.
+   * Multiple runners can apply until the requester accepts one - the first
+   * application flips the errand from OPEN to PENDING so the requester knows
+   * there's someone to review. Only RUNNER/BOTH roles can apply - a pure
+   * REQUESTER can't pick up work, same restriction as acceptErrand.
+   */
+  async applyToErrand(
+    errandId: string,
+    runnerId: string,
+    runnerRole: UserRole,
+    message?: string
+  ): Promise<ErrandApplication> {
+    const errand = await this.findOne(errandId);
+
+    if (errand.requesterId === runnerId) {
+      throw new ForbiddenException("You cannot apply to your own errand");
+    }
+
+    if (runnerRole === UserRole.REQUESTER) {
+      throw new ForbiddenException("Only runners can apply to errands");
+    }
+
+    if (
+      errand.status !== ErrandStatus.OPEN &&
+      errand.status !== ErrandStatus.PENDING
+    ) {
+      throw new BadRequestException(
+        "This errand is no longer accepting applicants"
+      );
+    }
+
+    if (errand.priorityUntil && errand.priorityUntil.getTime() > Date.now()) {
+      const runner = await this.usersService.findOne(runnerId);
+      if (!isProUser(runner)) {
+        throw new ForbiddenException(
+          "This errand is in its priority window for Pro users."
+        );
+      }
+    }
+
+    const existing = await this.errandApplicationsRepository.findOne({
+      where: { errandId, runnerId },
+    });
+    if (existing) {
+      throw new ConflictException("You have already applied to this errand");
+    }
+
+    const application = await this.errandApplicationsRepository.save(
+      this.errandApplicationsRepository.create({
+        errandId,
+        runnerId,
+        message,
+        status: ErrandApplicationStatus.PENDING,
+      })
+    );
+
+    if (errand.status === ErrandStatus.OPEN) {
+      await this.errandsRepository.update(errandId, {
+        status: ErrandStatus.PENDING,
+      });
+    }
+
+    return application;
+  }
+
+  /**
+   * The requester sees every applicant (with profile info, for review); an
+   * applying runner only ever sees their own application. Safe to call for
+   * anyone - it just scopes what comes back, no 403s needed.
+   */
+  async getApplications(errandId: string, userId: string): Promise<any[]> {
+    const errand = await this.findOne(errandId);
+    const isRequester = errand.requesterId === userId;
+
+    const applications = await this.errandApplicationsRepository.find({
+      where: isRequester ? { errandId } : { errandId, runnerId: userId },
+      relations: ["runner"],
+      order: { createdAt: "ASC" },
+    });
+
+    // Only ever hand back a scrubbed public shape for the runner - the full
+    // User entity (email, phone, dob, address, KYC, etc) must never reach
+    // whoever's reviewing this list.
+    return applications.map((application) => ({
+      id: application.id,
+      errandId: application.errandId,
+      status: application.status,
+      message: application.message,
+      createdAt: application.createdAt,
+      runner: this.usersService.toPublicProfile(application.runner),
+    }));
+  }
+
+  private async findApplicationOrThrow(
+    errandId: string,
+    applicationId: string
+  ): Promise<ErrandApplication> {
+    const application = await this.errandApplicationsRepository.findOne({
+      where: { id: applicationId, errandId },
+    });
+    if (!application) {
+      throw new NotFoundException("Application not found");
+    }
+    return application;
+  }
+
+  /**
+   * Requester picks one applicant after reviewing their profile/rating. The
+   * chosen application (and errand) move to ACCEPTED; every other still-
+   * pending application for the same errand is auto-declined.
+   */
+  async acceptApplication(
+    errandId: string,
+    applicationId: string,
+    requesterId: string
+  ): Promise<Errand> {
+    const errand = await this.findOne(errandId);
+
+    if (errand.requesterId !== requesterId) {
+      throw new ForbiddenException("Only the requester can accept an applicant");
+    }
+
+    const application = await this.findApplicationOrThrow(
+      errandId,
+      applicationId
+    );
+    if (application.status !== ErrandApplicationStatus.PENDING) {
+      throw new BadRequestException("This application has already been decided");
+    }
+
+    // Same atomic-conditional-update guard as acceptErrand, in case of a
+    // concurrent accept on another application for the same errand.
+    const result = await this.errandsRepository
+      .createQueryBuilder()
+      .update(Errand)
+      .set({
+        status: ErrandStatus.ACCEPTED,
+        runnerId: application.runnerId,
+        etaMinutes: 40,
+      })
+      .where("id = :id AND status IN (:...openStatuses)", {
+        id: errandId,
+        openStatuses: [ErrandStatus.OPEN, ErrandStatus.PENDING],
+      })
+      .execute();
+
+    if (result.affected === 0) {
+      throw new ConflictException("This errand was just accepted.");
+    }
+
+    await this.errandApplicationsRepository.update(applicationId, {
+      status: ErrandApplicationStatus.ACCEPTED,
+    });
+    // Order matters: the just-accepted row is no longer PENDING, so this
+    // bulk decline only sweeps up the remaining ones.
+    await this.errandApplicationsRepository.update(
+      { errandId, status: ErrandApplicationStatus.PENDING },
+      { status: ErrandApplicationStatus.DECLINED }
+    );
+
+    return this.findOne(errandId);
+  }
+
+  /**
+   * If that was the last pending application, the errand reverts to OPEN so
+   * new runners can apply again.
+   */
+  async declineApplication(
+    errandId: string,
+    applicationId: string,
+    requesterId: string
+  ): Promise<ErrandApplication> {
+    const errand = await this.findOne(errandId);
+
+    if (errand.requesterId !== requesterId) {
+      throw new ForbiddenException("Only the requester can decline an applicant");
+    }
+
+    const application = await this.findApplicationOrThrow(
+      errandId,
+      applicationId
+    );
+    if (application.status !== ErrandApplicationStatus.PENDING) {
+      throw new BadRequestException("This application has already been decided");
+    }
+
+    application.status = ErrandApplicationStatus.DECLINED;
+    await this.errandApplicationsRepository.save(application);
+
+    if (errand.status === ErrandStatus.PENDING) {
+      const remainingPending = await this.errandApplicationsRepository.count({
+        where: { errandId, status: ErrandApplicationStatus.PENDING },
+      });
+      if (remainingPending === 0) {
+        await this.errandsRepository.update(errandId, {
+          status: ErrandStatus.OPEN,
+        });
+      }
+    }
+
+    return application;
+  }
+
   async updateStatus(
     id: string,
     updateStatusDto: UpdateErrandStatusDto,
@@ -418,6 +637,12 @@ export class ErrandsService {
     }
 
     // Validate status transitions
+    if (updateStatusDto.status === ErrandStatus.PENDING) {
+      throw new BadRequestException(
+        "Pending is set automatically when a runner applies"
+      );
+    }
+
     if (updateStatusDto.status === ErrandStatus.COMPLETED) {
       if (errand.status !== ErrandStatus.IN_PROGRESS) {
         throw new BadRequestException(
@@ -480,9 +705,19 @@ export class ErrandsService {
       throw new ForbiddenException("Only the requester can cancel this errand");
     }
 
-    if (errand.status !== ErrandStatus.OPEN) {
+    if (
+      errand.status !== ErrandStatus.OPEN &&
+      errand.status !== ErrandStatus.PENDING
+    ) {
       throw new BadRequestException(
         "This errand has already been picked up by a runner and can no longer be cancelled. Contact support if the runner failed to complete it."
+      );
+    }
+
+    if (errand.status === ErrandStatus.PENDING) {
+      await this.errandApplicationsRepository.update(
+        { errandId: id, status: ErrandApplicationStatus.PENDING },
+        { status: ErrandApplicationStatus.DECLINED }
       );
     }
 

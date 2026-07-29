@@ -17,6 +17,7 @@ import { ErrandsService } from "./errands.service";
 import { CreateErrandDto } from "./dto/create-errand.dto";
 import { UpdateErrandStatusDto } from "./dto/update-errand-status.dto";
 import { FilterErrandsDto } from "./dto/filter-errands.dto";
+import { CreateApplicationDto } from "./dto/create-application.dto";
 import { MagicPostDto } from "./dto/magic-post.dto";
 import { PriceEstimateDto } from "./dto/price-estimate.dto";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
@@ -80,6 +81,59 @@ export class ErrandsController {
   @ApiOperation({ summary: "Accept an errand" })
   async acceptErrand(@Param("id") id: string, @Request() req) {
     return this.errandsService.acceptErrand(id, req.user.id, req.user.role);
+  }
+
+  @Post(":id/applications")
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: "Apply to run an errand" })
+  async applyToErrand(
+    @Param("id") id: string,
+    @Body() createApplicationDto: CreateApplicationDto,
+    @Request() req
+  ) {
+    return this.errandsService.applyToErrand(
+      id,
+      req.user.id,
+      req.user.role,
+      createApplicationDto.message
+    );
+  }
+
+  @Get(":id/applications")
+  @ApiOperation({
+    summary:
+      "List applicants for an errand (the requester sees everyone; an applying runner sees only their own application)",
+  })
+  async getApplications(@Param("id") id: string, @Request() req) {
+    return this.errandsService.getApplications(id, req.user.id);
+  }
+
+  @Patch(":id/applications/:applicationId/accept")
+  @ApiOperation({ summary: "Requester accepts an applicant" })
+  async acceptApplication(
+    @Param("id") id: string,
+    @Param("applicationId") applicationId: string,
+    @Request() req
+  ) {
+    return this.errandsService.acceptApplication(
+      id,
+      applicationId,
+      req.user.id
+    );
+  }
+
+  @Patch(":id/applications/:applicationId/decline")
+  @ApiOperation({ summary: "Requester declines an applicant" })
+  async declineApplication(
+    @Param("id") id: string,
+    @Param("applicationId") applicationId: string,
+    @Request() req
+  ) {
+    return this.errandsService.declineApplication(
+      id,
+      applicationId,
+      req.user.id
+    );
   }
 
   @Patch(":id/status")

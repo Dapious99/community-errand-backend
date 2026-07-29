@@ -27,6 +27,12 @@ export class KYC {
   bvn?: string;
 
   @Column({ nullable: true })
+  nin?: string;
+
+  @Column({ nullable: true })
+  ninImageUrl?: string;
+
+  @Column({ nullable: true })
   idCardUrl?: string;
 
   @Column({ nullable: true })
@@ -37,6 +43,21 @@ export class KYC {
 
   @Column({ nullable: true })
   paystackRecipientCode?: string;
+
+  // Set once Dojah confirms a match for the submitted nin/bvn - this is only
+  // an automated signal for the admin reviewer, it does not by itself
+  // approve the KYC (see `status`/`approveKyc`/`rejectKyc`).
+  @Column({ type: "timestamp", nullable: true })
+  ninVerifiedAt?: Date;
+
+  @Column({ type: "timestamp", nullable: true })
+  bvnVerifiedAt?: Date;
+
+  @Column("jsonb", { nullable: true })
+  ninVerificationData?: Record<string, any>;
+
+  @Column("jsonb", { nullable: true })
+  bvnVerificationData?: Record<string, any>;
 
   @Column({
     type: "enum",
