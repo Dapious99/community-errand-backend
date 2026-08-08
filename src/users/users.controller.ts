@@ -13,17 +13,20 @@ import {
 import { ApiTags, ApiOperation, ApiBearerAuth } from "@nestjs/swagger";
 import { UsersService } from "./users.service";
 import { UpdateUserDto } from "./dto/update-user.dto";
-import { CreateKycDto } from "./dto/create-kyc.dto";
-import { ConfirmBankChangeDto } from "./dto/confirm-bank-change.dto";
 import { UpdateLocationDto } from "./dto/update-location.dto";
+import { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
 import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
+import { WhatsappLinkService } from "../whatsapp/whatsapp-link.service";
 
 @ApiTags("users")
 @Controller("users")
 @UseGuards(JwtAuthGuard)
 @ApiBearerAuth()
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly whatsappLinkService: WhatsappLinkService
+  ) {}
 
   @Get("profile")
   @ApiOperation({ summary: "Get current user profile" })
@@ -43,42 +46,6 @@ export class UsersController {
     return this.usersService.getUserStats(req.user.id);
   }
 
-  @Post("kyc")
-  @HttpCode(HttpStatus.CREATED)
-  @ApiOperation({ summary: "Submit KYC information" })
-  async submitKyc(@Request() req, @Body() createKycDto: CreateKycDto) {
-    return this.usersService.submitKyc(req.user.id, createKycDto);
-  }
-
-  @Get("kyc")
-  @ApiOperation({ summary: "Get current user KYC status" })
-  async getKyc(@Request() req) {
-    return this.usersService.getKyc(req.user.id);
-  }
-
-  @Post("kyc/confirm-bank-change")
-  @ApiOperation({
-    summary: "Confirm a pending bank detail change with the emailed code",
-  })
-  async confirmBankChange(
-    @Request() req,
-    @Body() confirmBankChangeDto: ConfirmBankChangeDto
-  ) {
-    return this.usersService.confirmBankChange(
-      req.user.id,
-      confirmBankChangeDto.code
-    );
-  }
-
-  @Post("kyc/resend-bank-change-code")
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({
-    summary: "Resend the pending bank detail change confirmation code",
-  })
-  async resendBankChangeCode(@Request() req) {
-    return this.usersService.resendBankChangeCode(req.user.id);
-  }
-
   @Patch("location")
   @ApiOperation({
     summary: "Report the current user's last known location (runners)",
@@ -93,6 +60,32 @@ export class UsersController {
       updateLocationDto.longitude
     );
     return { message: "Location updated" };
+  }
+
+  @Get("notification-preferences")
+  @ApiOperation({ summary: "Get the current user's push notification preferences" })
+  async getNotificationPreferences(@Request() req) {
+    return this.usersService.getNotificationPreferences(req.user.id);
+  }
+
+  @Patch("notification-preferences")
+  @ApiOperation({ summary: "Update the current user's push notification preferences" })
+  async updateNotificationPreferences(
+    @Request() req,
+    @Body() dto: UpdateNotificationPreferencesDto
+  ) {
+    return this.usersService.updateNotificationPreferences(req.user.id, dto);
+  }
+
+  @Post("whatsapp/link-code")
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary:
+      "Generate a one-time code (valid 10 minutes) to link your WhatsApp number - send it as a message to the app's WhatsApp number to finish linking",
+  })
+  async createWhatsappLinkCode(@Request() req) {
+    const code = await this.whatsappLinkService.generateCode(req.user.id);
+    return { code, expiresInSeconds: 600 };
   }
 
   @Get(":id/ratings")

@@ -221,7 +221,9 @@ Every user gets a `referralCode` at signup (see Authentication above), but refer
 - `POST /notifications/register-token` - Register/update this device's Expo push token
 
 ### Admin (separate auth - see below)
-- `POST /admin/auth/login` - Admin login
+- `POST /admin/auth/login` - Admin login step 1: verifies credentials, emails an OTP
+- `POST /admin/auth/verify-otp` - Admin login step 2: confirms the OTP, returns the access token
+- `POST /admin/auth/resend-otp` - Resend the admin login OTP
 - `GET /admin/settings` - List all platform settings
 - `PATCH /admin/settings/:key` - Create or update a platform setting (e.g. `ai_boost_price_ngn`)
 - `GET /admin/kyc?status=pending` - List KYC submissions, optionally filtered by status
@@ -274,7 +276,15 @@ All four flows share the same underlying `OtpService.resend()` mechanism
 (except signup, whose "resend" predates it and is a dedicated action since
 `register()` itself can't be safely re-called for an existing account) - it
 reuses whatever metadata was stored with the original code and issues a
-fresh one with a full TTL and reset attempt counter.
+fresh one with a full TTL and reset attempt counter. Admin login (below) adds
+a fifth OTP-gated flow on the same mechanism.
+
+**Fixed codes during early testing**: with `OTP_STATIC_CODE_USER` /
+`OTP_STATIC_CODE_ADMIN` set in `.env`, every code request for that role
+returns the same fixed value instead of a random one - `425621` for all four
+user flows above, `983467` for admin login - so testers can complete any of
+these flows without reading an email. See SETUP.md for details; unset both
+before going to production.
 
 ## Admin Panel Authentication
 
@@ -287,9 +297,15 @@ admin via:
 npm run admin:create -- --email=you@example.com --name="Ops" --password="..."
 ```
 
-Then `POST /admin/auth/login` to get an admin access token for the
-`/admin/*` endpoints. All admin accounts currently have identical,
-unrestricted access - there's no per-admin role/permission system yet.
+Login is two steps: `POST /admin/auth/login { email, password }` verifies
+credentials and emails a 6-digit OTP instead of returning a token -
+`{ requiresOtp: true, message }`. Confirm with
+`POST /admin/auth/verify-otp { email, code }` to get the admin access token
+for the `/admin/*` endpoints (an admin can never reach those endpoints from
+credentials alone). `POST /admin/auth/resend-otp { email }` issues a fresh
+code without re-entering the password. All admin accounts currently have
+identical, unrestricted access once logged in - there's no per-admin
+role/permission system yet.
 
 ## AI Features
 

@@ -12,7 +12,7 @@ export interface DojahVerificationResult {
  * Wraps Dojah's KYC lookup API (NIN + BVN). Verification here is only an
  * automated signal stored alongside the KYC submission for the admin
  * reviewer - it never auto-approves/rejects on its own (see
- * UsersService.approveKyc/rejectKyc), since a name/DOB mismatch can be a
+ * KycService.approveKyc/rejectKyc), since a name/DOB mismatch can be a
  * legitimate data-entry difference that a human should still weigh in on.
  * Failures (bad keys, Dojah downtime, no match) are swallowed and logged so
  * a KYC submission never fails outright just because this lookup didn't

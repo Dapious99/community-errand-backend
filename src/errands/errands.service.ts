@@ -7,9 +7,12 @@ import {
   ConflictException,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { Repository } from "typeorm";
-import { OnEvent } from "@nestjs/event-emitter";
+import { In, Repository } from "typeorm";
 import { Errand, ErrandStatus } from "./entities/errand.entity";
+import {
+  ErrandConcern,
+  ErrandConcernStatus,
+} from "./entities/errand-concern.entity";
 import { Location, LocationType } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
 import {
@@ -19,7 +22,7 @@ import {
 import { CreateErrandDto } from "./dto/create-errand.dto";
 import { UpdateErrandStatusDto } from "./dto/update-errand-status.dto";
 import { FilterErrandsDto } from "./dto/filter-errands.dto";
-import { UserRole } from "../users/entities/user.entity";
+import { User, UserRole } from "../users/entities/user.entity";
 import { PaymentsService } from "../payments/payments.service";
 import { SettingsService } from "../settings/settings.service";
 import { AiService } from "../ai/ai.service";
@@ -29,6 +32,9 @@ import { WalletTransactionType } from "../wallet/entities/wallet-transaction.ent
 import { UsersService } from "../users/users.service";
 import { isProUser } from "../users/utils/is-pro-user";
 import { ReferralsService } from "../referrals/referrals.service";
+import { KycService } from "../kyc/kyc.service";
+import { KYCStatus } from "../users/entities/kyc.entity";
+import { CountryConfigService } from "../settings/country-config.service";
 
 @Injectable()
 export class ErrandsService {
@@ -43,13 +49,17 @@ export class ErrandsService {
     private mediaAttachmentsRepository: Repository<MediaAttachment>,
     @InjectRepository(ErrandApplication)
     private errandApplicationsRepository: Repository<ErrandApplication>,
+    @InjectRepository(ErrandConcern)
+    private errandConcernsRepository: Repository<ErrandConcern>,
     private paymentsService: PaymentsService,
     private settingsService: SettingsService,
     private aiService: AiService,
     private notificationsService: NotificationsService,
     private walletService: WalletService,
     private usersService: UsersService,
-    private referralsService: ReferralsService
+    private referralsService: ReferralsService,
+    private kycService: KycService,
+    private countryConfigService: CountryConfigService
   ) {}
 
   async create(
@@ -57,34 +67,47 @@ export class ErrandsService {
     userId: string,
     userEmail: string
   ): Promise<
-    Errand & { boostPayment?: { authorizationUrl: string; reference: string } }
+    Errand & { boostFailed?: boolean; boostFailureReason?: string }
   > {
     const { locations, mediaAttachments, isBoosted, ...errandData } =
       createErrandDto;
     const requiredRunners = errandData.requiredRunners ?? 1;
 
+    const requester = await this.usersService.findOne(userId);
+    this.assertRequesterEligible(requester);
+    const countryConfig = await this.countryConfigService.get(
+      requester.country
+    );
+
     // Debit the requester's wallet before creating anything - if they can't
     // afford it, nothing gets created at all. There's no errand row yet at
-    // this point, so the transaction is linked to it afterward.
+    // this point, so the transaction is linked to it afterward. The tip (if
+    // any) is escrowed in this same lump sum, alongside the price - that way
+    // a single reversal of this transaction (cancel, concern-reopen forfeit,
+    // deadline-miss forfeit) always refunds price + tip together with no
+    // extra bookkeeping.
+    const escrowAmount = errandData.price + (errandData.tip ?? 0);
     const paymentTransaction = await this.walletService.debit(
       userId,
-      errandData.price,
+      escrowAmount,
       WalletTransactionType.ERRAND_PAYMENT,
       { description: `Payment for errand "${errandData.title}"` }
     );
 
-    // Pro perk: high-value or multi-runner errands get a priority window
-    // where only Pro runners can see/accept them (see findAll/acceptErrand).
-    const priorityThreshold = await this.settingsService.get<number>(
-      "pro_priority_price_threshold_ngn",
-      20000
-    );
+    // Pro perk: high-value errands, multi-runner errands, and boosted
+    // errands all get a priority window where only Pro runners can see/
+    // accept them (see findAll/acceptErrand) - boosted errands earn this the
+    // same as high-value ones, since the requester is already paying for
+    // faster, better-matched attention.
+    const priorityThreshold = countryConfig.priorityPriceThreshold;
     const priorityWindowMinutes = await this.settingsService.get<number>(
       "pro_priority_window_minutes",
       30
     );
     const isPriorityErrand =
-      errandData.price >= priorityThreshold || requiredRunners > 1;
+      errandData.price >= priorityThreshold ||
+      requiredRunners > 1 ||
+      isBoosted;
     const priorityUntil = isPriorityErrand
       ? new Date(Date.now() + priorityWindowMinutes * 60 * 1000)
       : undefined;
@@ -136,7 +159,8 @@ export class ErrandsService {
     }
 
     const result: Errand & {
-      boostPayment?: { authorizationUrl: string; reference: string };
+      boostFailed?: boolean;
+      boostFailureReason?: string;
     } = await this.findOne(savedErrand.id);
 
     // Pro perk: every new errand (not just boosted ones - that's the
@@ -161,25 +185,74 @@ export class ErrandsService {
     }
 
     if (isBoosted) {
+      const boostQuote = await this.getBoostPriceQuote(userId);
+      const boostPrice = boostQuote.price;
+
       try {
-        const boostPrice = await this.settingsService.get<number>(
-          "ai_boost_price_ngn",
-          2500
-        );
-        const boostPayment = await this.paymentsService.initializeBoostPayment(
-          savedErrand.id,
+        // Charged directly from the wallet, synchronously - unlike the
+        // errand price itself, an insufficient balance here must NOT undo
+        // the errand that was just created: the requester can still post
+        // without the boost, so a failure here is caught and surfaced back
+        // as a flag rather than thrown.
+        await this.walletService.debit(
           userId,
-          userEmail,
-          boostPrice
+          boostPrice,
+          WalletTransactionType.BOOST,
+          {
+            errandId: savedErrand.id,
+            description: `AI-Boost for errand "${savedErrand.title}"`,
+          }
         );
-        result.boostPayment = {
-          authorizationUrl: boostPayment.authorizationUrl,
-          reference: boostPayment.reference,
-        };
+
+        await this.errandsRepository.update(savedErrand.id, {
+          isBoosted: true,
+          boostedAt: new Date(),
+        });
+        result.isBoosted = true;
+        result.boostedAt = new Date();
+
+        try {
+          const boostedTitle = await this.aiService.rewriteBoostTitle(
+            result.title,
+            result.description
+          );
+          await this.errandsRepository.update(savedErrand.id, {
+            title: boostedTitle,
+          });
+          result.title = boostedTitle;
+        } catch (error: any) {
+          this.logger.warn(
+            `AI title rewrite failed for boosted errand ${savedErrand.id}: ${error.message}`
+          );
+        }
+
+        try {
+          const pickup = result.locations?.find(
+            (l) => l.type === LocationType.PICKUP
+          );
+          if (pickup?.latitude != null && pickup?.longitude != null) {
+            await this.notificationsService.notifyNearbyTopRatedRunners({
+              latitude: pickup.latitude,
+              longitude: pickup.longitude,
+              title: "New boosted errand nearby!",
+              body: result.title,
+              data: { errandId: savedErrand.id },
+            });
+          }
+        } catch (error: any) {
+          this.logger.warn(
+            `Boost notification fan-out failed for errand ${savedErrand.id}: ${error.message}`
+          );
+        }
       } catch (error: any) {
-        this.logger.error(
-          `Failed to initialize boost payment for errand ${savedErrand.id}: ${error.message}`
+        this.logger.warn(
+          `Boost payment failed for errand ${savedErrand.id}, errand still created without it: ${error.message}`
         );
+        result.boostFailed = true;
+        result.boostFailureReason =
+          error instanceof BadRequestException
+            ? "insufficient_balance"
+            : "unknown";
       }
     }
 
@@ -187,54 +260,33 @@ export class ErrandsService {
   }
 
   /**
-   * The AI-Boost's actual effects (title rewrite, isBoosted flag, runner
-   * notifications) only activate once Paystack confirms the charge
-   * succeeded - not the moment checkout is initialized in `create()` above -
-   * so a user can't get the paid perks without completing payment.
+   * Dynamic/surge boost pricing: a deliberately simple, explainable signal
+   * rather than a demand-forecasting model. Once the number of currently
+   * OPEN errands hits `CountryConfig.surgeThresholdOpenErrands` (a lot of
+   * requesters competing for the same limited runner attention), the boost
+   * - which buys faster, better-matched attention - is worth more, so its
+   * price is multiplied by `CountryConfig.surgeMultiplier`.
    */
-  @OnEvent("payment.boost.succeeded")
-  async handleBoostPaymentSucceeded({
-    errandId,
-  }: {
-    errandId: string;
-  }): Promise<void> {
-    await this.errandsRepository.update(errandId, {
-      isBoosted: true,
-      boostedAt: new Date(),
+  async getBoostPriceQuote(userId: string): Promise<{
+    price: number;
+    isSurge: boolean;
+    currencySymbol: string;
+  }> {
+    const requester = await this.usersService.findOne(userId);
+    const countryConfig = await this.countryConfigService.get(
+      requester.country
+    );
+    const openErrandsCount = await this.errandsRepository.count({
+      where: { status: ErrandStatus.OPEN },
     });
+    const isSurge = openErrandsCount >= countryConfig.surgeThresholdOpenErrands;
+    const price = isSurge
+      ? Number(
+          (countryConfig.boostPrice * countryConfig.surgeMultiplier).toFixed(2)
+        )
+      : countryConfig.boostPrice;
 
-    try {
-      const errand = await this.findOne(errandId);
-      const boostedTitle = await this.aiService.rewriteBoostTitle(
-        errand.title,
-        errand.description
-      );
-      await this.errandsRepository.update(errandId, { title: boostedTitle });
-    } catch (error: any) {
-      this.logger.warn(
-        `AI title rewrite failed for boosted errand ${errandId}: ${error.message}`
-      );
-    }
-
-    try {
-      const errand = await this.findOne(errandId);
-      const pickup = errand.locations?.find(
-        (l) => l.type === LocationType.PICKUP
-      );
-      if (pickup?.latitude != null && pickup?.longitude != null) {
-        await this.notificationsService.notifyNearbyTopRatedRunners({
-          latitude: pickup.latitude,
-          longitude: pickup.longitude,
-          title: "New boosted errand nearby!",
-          body: errand.title,
-          data: { errandId },
-        });
-      }
-    } catch (error: any) {
-      this.logger.warn(
-        `Boost notification fan-out failed for errand ${errandId}: ${error.message}`
-      );
-    }
+    return { price, isSurge, currencySymbol: countryConfig.currencySymbol };
   }
 
   async findAll(
@@ -326,8 +378,10 @@ export class ErrandsService {
       .take(limit)
       .getManyAndCount();
 
+    await this.attachOpenConcernFlags(data);
+
     return {
-      data,
+      data: data.map((errand) => this.scrubParticipants(errand)),
       total,
       page,
       limit,
@@ -337,29 +391,145 @@ export class ErrandsService {
   async findOne(id: string): Promise<Errand> {
     const errand = await this.errandsRepository.findOne({
       where: { id },
-      relations: [
-        "requester",
-        "runner",
-        "locations",
-        "mediaAttachments",
-        "messages",
-        "ratings",
-      ],
+      // Deliberately no "messages"/"ratings" here - this is viewable by any
+      // authenticated user (e.g. browsing an open errand before applying),
+      // not just its participants, and those endpoints already have their
+      // own dedicated, properly-scoped routes.
+      relations: ["requester", "runner", "locations", "mediaAttachments"],
     });
 
     if (!errand) {
       throw new NotFoundException("Errand not found");
     }
 
-    return errand;
+    await this.attachOpenConcernFlags([errand]);
+
+    return this.scrubParticipants(errand);
   }
 
   async findMyErrands(userId: string): Promise<Errand[]> {
-    return this.errandsRepository.find({
+    const errands = await this.errandsRepository.find({
       where: [{ requesterId: userId }, { runnerId: userId }],
       relations: ["requester", "runner", "locations", "mediaAttachments"],
       order: { createdAt: "DESC" },
     });
+
+    await this.attachOpenConcernFlags(errands);
+
+    return errands.map((errand) => this.scrubParticipants(errand));
+  }
+
+  /** One indexed query for the whole batch rather than one per errand. */
+  private async attachOpenConcernFlags(errands: Errand[]): Promise<void> {
+    if (errands.length === 0) return;
+
+    const activeConcerns = await this.errandConcernsRepository.find({
+      where: {
+        errandId: In(errands.map((errand) => errand.id)),
+        status: In([ErrandConcernStatus.OPEN, ErrandConcernStatus.ACKNOWLEDGED]),
+      },
+    });
+    const errandIdsWithConcern = new Set(
+      activeConcerns.map((concern) => concern.errandId)
+    );
+
+    for (const errand of errands) {
+      errand.hasOpenConcern = errandIdsWithConcern.has(errand.id);
+    }
+  }
+
+  /**
+   * `requester`/`runner` load as full `User` entities (only `passwordHash`
+   * is `@Exclude()`'d) - every errand-reading endpoint is reachable by
+   * someone other than that user (any browser of the open feed, the other
+   * participant, etc), so email/phone/DOB/address/emergency-contact/etc must
+   * never leave this service. Swap in the same curated shape `/users/:id/
+   * public-profile` already uses.
+   */
+  private scrubParticipants(errand: Errand): Errand {
+    if (errand.requester) {
+      errand.requester = this.usersService.toPublicProfile(
+        errand.requester
+      ) as unknown as Errand["requester"];
+    }
+    if (errand.runner) {
+      errand.runner = this.usersService.toPublicProfile(
+        errand.runner
+      ) as unknown as Errand["runner"];
+    }
+    return errand;
+  }
+
+  /**
+   * Gatekeeps posting - mirrors assertRunnerEligible's ban check but for
+   * repeated cancellations (see UsersService.recordPostingFailure, cancel()
+   * below). Never touches KYC/phone - those only gate picking up work.
+   */
+  private assertRequesterEligible(requester: User): void {
+    if (requester.permanentlyBannedFromPosting) {
+      throw new ForbiddenException(
+        "You've been permanently restricted from posting errands due to repeated cancellations. Contact support if you believe this is a mistake."
+      );
+    }
+    if (
+      requester.requesterBannedUntil &&
+      requester.requesterBannedUntil.getTime() > Date.now()
+    ) {
+      throw new ForbiddenException(
+        `You're temporarily restricted from posting errands until ${requester.requesterBannedUntil.toISOString()} due to repeated cancellations.`
+      );
+    }
+  }
+
+  /**
+   * Gatekeeps picking up work (applying/accepting) - never posting. Checks,
+   * in order: an active ban (see ConcernsService/UsersService.
+   * recordErrandFailure, escalates 72h -> 7 days -> permanent), a phone
+   * number on file (compulsory as of the multi-country rollout), and an
+   * identity KYC. The KYC bar is tiered by the errand's price: below
+   * `CountryConfig.lightKycPriceThreshold`, a submitted-but-not-yet-reviewed
+   * (PENDING) KYC is enough - full admin APPROVED status is only required at
+   * or above that threshold, and unconditionally before any withdrawal
+   * regardless of price (see PaymentsService.initiateWithdrawal). A REJECTED
+   * or missing KYC is never enough, at any price.
+   */
+  private async assertRunnerEligible(
+    runner: User,
+    errandPrice: number
+  ): Promise<void> {
+    if (runner.permanentlyBannedFromPicking) {
+      throw new ForbiddenException(
+        "You've been permanently restricted from picking errands due to repeated non-completion. Contact support if you believe this is a mistake."
+      );
+    }
+    if (runner.runnerBannedUntil && runner.runnerBannedUntil.getTime() > Date.now()) {
+      throw new ForbiddenException(
+        `You're temporarily restricted from picking errands until ${runner.runnerBannedUntil.toISOString()} due to repeated non-completion.`
+      );
+    }
+    if (!runner.phone) {
+      throw new ForbiddenException(
+        "Add a phone number to your profile before picking errands."
+      );
+    }
+
+    const kyc = await this.kycService.getKyc(runner.id).catch(() => null);
+    if (!kyc || kyc.status === KYCStatus.REJECTED) {
+      throw new ForbiddenException(
+        "Verify your NIN before picking errands - submit it from the Identity Verification screen."
+      );
+    }
+    if (kyc.status === KYCStatus.APPROVED) {
+      return;
+    }
+
+    // PENDING at this point - allowed only under the country's light-KYC threshold.
+    const countryConfig = await this.countryConfigService.get(runner.country);
+    if (errandPrice >= countryConfig.lightKycPriceThreshold) {
+      throw new ForbiddenException(
+        `Errands above ${countryConfig.currencySymbol}${countryConfig.lightKycPriceThreshold.toLocaleString()} require your identity verification to be fully approved first - it's still under review.`
+      );
+    }
   }
 
   async acceptErrand(
@@ -381,11 +551,13 @@ export class ErrandsService {
       throw new ForbiddenException("Only runners can accept errands");
     }
 
+    const runner = await this.usersService.findOne(userId);
+    await this.assertRunnerEligible(runner, errand.price);
+
     // Defense in depth for the Pro priority-access perk: findAll() already
     // hides these from non-Pro users, but a direct accept call (from a
     // shared link, a stale client cache, etc.) must be blocked too.
     if (errand.priorityUntil && errand.priorityUntil.getTime() > Date.now()) {
-      const runner = await this.usersService.findOne(userId);
       if (!isProUser(runner)) {
         throw new ForbiddenException(
           "This errand is in its priority window for Pro users."
@@ -399,10 +571,11 @@ export class ErrandsService {
     // first runner's acceptance. This is what actually prevents the race,
     // not a periodic job (which could only detect the collision after the
     // fact, once both requests already believed they'd succeeded).
+    const etaMinutes = await this.getDefaultAcceptEtaMinutes();
     const result = await this.errandsRepository
       .createQueryBuilder()
       .update(Errand)
-      .set({ status: ErrandStatus.ACCEPTED, runnerId: userId, etaMinutes: 40 })
+      .set({ status: ErrandStatus.ACCEPTED, runnerId: userId, etaMinutes })
       .where("id = :id AND status = :openStatus", {
         id,
         openStatus: ErrandStatus.OPEN,
@@ -441,6 +614,9 @@ export class ErrandsService {
       throw new ForbiddenException("Only runners can apply to errands");
     }
 
+    const runner = await this.usersService.findOne(runnerId);
+    await this.assertRunnerEligible(runner, errand.price);
+
     if (
       errand.status !== ErrandStatus.OPEN &&
       errand.status !== ErrandStatus.PENDING
@@ -451,7 +627,6 @@ export class ErrandsService {
     }
 
     if (errand.priorityUntil && errand.priorityUntil.getTime() > Date.now()) {
-      const runner = await this.usersService.findOne(runnerId);
       if (!isProUser(runner)) {
         throw new ForbiddenException(
           "This errand is in its priority window for Pro users."
@@ -551,13 +726,14 @@ export class ErrandsService {
 
     // Same atomic-conditional-update guard as acceptErrand, in case of a
     // concurrent accept on another application for the same errand.
+    const etaMinutes = await this.getDefaultAcceptEtaMinutes();
     const result = await this.errandsRepository
       .createQueryBuilder()
       .update(Errand)
       .set({
         status: ErrandStatus.ACCEPTED,
         runnerId: application.runnerId,
-        etaMinutes: 40,
+        etaMinutes,
       })
       .where("id = :id AND status IN (:...openStatuses)", {
         id: errandId,
@@ -674,12 +850,35 @@ export class ErrandsService {
           `Referral completion check failed for errand ${savedErrand.id}: ${error.message}`
         );
       }
+
+      if (savedErrand.runnerId) {
+        try {
+          await this.usersService.resetErrandFailures(savedErrand.runnerId);
+        } catch (error: any) {
+          this.logger.error(
+            `Failed to reset errand-failure streak for runner ${savedErrand.runnerId}: ${error.message}`
+          );
+        }
+      }
+
+      try {
+        await this.usersService.resetPostingFailures(savedErrand.requesterId);
+      } catch (error: any) {
+        this.logger.error(
+          `Failed to reset posting-failure streak for requester ${savedErrand.requesterId}: ${error.message}`
+        );
+      }
     }
 
     return savedErrand;
   }
 
-  /** Only pays out a pending referral on the referred user's first-ever completed errand (either side). */
+  /**
+   * Only pays out a pending referral once the referred user's lifetime
+   * completed-errand count (either side) reaches `referral_qualifying_errand_count`
+   * (default: 1, i.e. their first). Admin-tunable via
+   * `PATCH /admin/settings/referral_qualifying_errand_count`.
+   */
   private async maybeCompleteReferral(userId: string): Promise<void> {
     const completedCount = await this.errandsRepository.count({
       where: [
@@ -687,16 +886,26 @@ export class ErrandsService {
         { runnerId: userId, status: ErrandStatus.COMPLETED },
       ],
     });
-    if (completedCount === 1) {
+    const qualifyingCount = await this.settingsService.get(
+      "referral_qualifying_errand_count",
+      1
+    );
+    if (completedCount === qualifyingCount) {
       await this.referralsService.completeIfPending(userId);
     }
   }
 
+  /** Admin-tunable via `PATCH /admin/settings/errand_accept_eta_minutes`. */
+  private async getDefaultAcceptEtaMinutes(): Promise<number> {
+    return this.settingsService.get("errand_accept_eta_minutes", 40);
+  }
+
   /**
    * Only possible before a runner has picked up the errand - once accepted,
-   * the requester can no longer cancel through this endpoint (there's no
-   * dispute/"runner default" resolution flow in this codebase yet; that
-   * needs a separate admin/support path).
+   * the requester can no longer cancel through this endpoint. Their recourse
+   * at that point is ConcernsService.raise (which reopens the errand rather
+   * than refunding it) or, for a timed errand, letting the deadline sweep
+   * in ConcernsService.processTimedErrandDeadlines cancel and refund it.
    */
   async cancel(id: string, userId: string): Promise<void> {
     const errand = await this.findOne(id);
@@ -710,7 +919,7 @@ export class ErrandsService {
       errand.status !== ErrandStatus.PENDING
     ) {
       throw new BadRequestException(
-        "This errand has already been picked up by a runner and can no longer be cancelled. Contact support if the runner failed to complete it."
+        "This errand has already been picked up by a runner and can no longer be cancelled. Raise a concern instead if the runner isn't able to complete it."
       );
     }
 
@@ -729,6 +938,14 @@ export class ErrandsService {
     } catch (error: any) {
       this.logger.error(
         `Failed to process refund for errand ${id}: ${error.message}`
+      );
+    }
+
+    try {
+      await this.usersService.recordPostingFailure(userId);
+    } catch (error: any) {
+      this.logger.error(
+        `Failed to record posting-failure streak for requester ${userId}: ${error.message}`
       );
     }
   }

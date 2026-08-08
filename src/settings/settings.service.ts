@@ -1,10 +1,12 @@
-import { Injectable } from "@nestjs/common";
+import { Injectable, Logger } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import { PlatformSetting } from "./entities/platform-setting.entity";
 
 @Injectable()
 export class SettingsService {
+  private readonly logger = new Logger(SettingsService.name);
+
   constructor(
     @InjectRepository(PlatformSetting)
     private settingsRepository: Repository<PlatformSetting>
@@ -18,6 +20,12 @@ export class SettingsService {
     try {
       return JSON.parse(row.value) as T;
     } catch {
+      // A malformed stored value (e.g. a bad admin edit) would otherwise
+      // silently and invisibly fall back everywhere this key is read -
+      // boost price, priority thresholds, withdrawal fee %, etc.
+      this.logger.warn(
+        `Setting "${key}" has a malformed value ("${row.value}"); using fallback ${JSON.stringify(fallback)}`
+      );
       return fallback;
     }
   }

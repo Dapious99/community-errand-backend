@@ -3,15 +3,13 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 import { UsersService } from "./users.service";
 import { UsersController } from "./users.controller";
 import { User } from "./entities/user.entity";
-import { KYC } from "./entities/kyc.entity";
 import { RatingsModule } from "../ratings/ratings.module";
-import { OtpModule } from "../otp/otp.module";
-import { DojahService } from "./services/dojah.service";
+import { WhatsappLinkModule } from "../whatsapp/whatsapp-link.module";
 
 @Module({
-  imports: [TypeOrmModule.forFeature([User, KYC]), RatingsModule, OtpModule],
+  imports: [TypeOrmModule.forFeature([User]), RatingsModule, WhatsappLinkModule],
   controllers: [UsersController],
-  providers: [UsersService, DojahService],
+  providers: [UsersService],
   exports: [UsersService],
 })
 export class UsersModule {}

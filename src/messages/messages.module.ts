@@ -8,6 +8,8 @@ import { Errand } from "../errands/entities/errand.entity";
 import { JwtModule } from "@nestjs/jwt";
 import { ConfigModule } from "@nestjs/config";
 import { AiModule } from "../ai/ai.module";
+import { UsersModule } from "../users/users.module";
+import { NotificationsModule } from "../notifications/notifications.module";
 
 @Module({
   imports: [
@@ -15,6 +17,8 @@ import { AiModule } from "../ai/ai.module";
     JwtModule,
     ConfigModule,
     AiModule,
+    UsersModule,
+    NotificationsModule,
   ],
   controllers: [MessagesController],
   providers: [MessagesService, MessagesGateway],

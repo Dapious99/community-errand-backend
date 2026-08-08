@@ -10,6 +10,7 @@ import {
 import { User } from "../users/entities/user.entity";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
+import { CountryConfigService } from "../settings/country-config.service";
 import { SettingsService } from "../settings/settings.service";
 
 describe("SubscriptionsService", () => {
@@ -17,6 +18,7 @@ describe("SubscriptionsService", () => {
   let subscriptionsRepo: any;
   let usersRepo: any;
   let walletService: jest.Mocked<WalletService>;
+  let countryConfigService: jest.Mocked<CountryConfigService>;
   let settingsService: jest.Mocked<SettingsService>;
 
   beforeEach(async () => {
@@ -44,8 +46,25 @@ describe("SubscriptionsService", () => {
           useValue: { debit: jest.fn() },
         },
         {
+          provide: CountryConfigService,
+          useValue: {
+            get: jest.fn().mockResolvedValue({
+              subscriptionPrices: {
+                monthly: 1500,
+                quarterly: 4000,
+                semi_annual: 7000,
+                annual: 12000,
+              },
+            }),
+          },
+        },
+        {
           provide: SettingsService,
-          useValue: { get: jest.fn((key: string, fallback: any) => fallback) },
+          useValue: {
+            get: jest.fn((key: string, fallback: any) =>
+              Promise.resolve(fallback)
+            ),
+          },
         },
       ],
     }).compile();
@@ -54,12 +73,38 @@ describe("SubscriptionsService", () => {
     subscriptionsRepo = module.get(getRepositoryToken(Subscription));
     usersRepo = module.get(getRepositoryToken(User));
     walletService = module.get(WalletService);
+    countryConfigService = module.get(CountryConfigService);
     settingsService = module.get(SettingsService);
+  });
+
+  describe("getPlanDurationDays", () => {
+    it("returns the default duration for a plan when unconfigured", async () => {
+      const days = await service.getPlanDurationDays(SubscriptionPlan.MONTHLY);
+
+      expect(days).toBe(30);
+    });
+
+    it("honors an admin-configured duration map", async () => {
+      settingsService.get.mockResolvedValueOnce({
+        monthly: 14,
+        quarterly: 90,
+        semi_annual: 180,
+        annual: 365,
+      });
+
+      const days = await service.getPlanDurationDays(SubscriptionPlan.MONTHLY);
+
+      expect(days).toBe(14);
+    });
   });
 
   describe("subscribe", () => {
     it("debits the wallet at the plan's current price and sets expiresAt from now", async () => {
-      usersRepo.findOne.mockResolvedValue({ id: "user-1", proExpiresAt: null });
+      usersRepo.findOne.mockResolvedValue({
+        id: "user-1",
+        proExpiresAt: null,
+        country: "Nigeria",
+      });
       walletService.debit.mockResolvedValue({ id: "tx-1" } as any);
 
       const result = await service.subscribe(
@@ -68,10 +113,7 @@ describe("SubscriptionsService", () => {
         false
       );
 
-      expect(settingsService.get).toHaveBeenCalledWith(
-        "pro_price_monthly_ngn",
-        1500
-      );
+      expect(countryConfigService.get).toHaveBeenCalledWith("Nigeria");
       expect(walletService.debit).toHaveBeenCalledWith(
         "user-1",
         1500,

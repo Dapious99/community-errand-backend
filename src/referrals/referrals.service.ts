@@ -6,7 +6,7 @@ import { User } from "../users/entities/user.entity";
 import { isProUser } from "../users/utils/is-pro-user";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
-import { SettingsService } from "../settings/settings.service";
+import { CountryConfigService } from "../settings/country-config.service";
 
 @Injectable()
 export class ReferralsService {
@@ -18,7 +18,7 @@ export class ReferralsService {
     @InjectRepository(User)
     private usersRepository: Repository<User>,
     private walletService: WalletService,
-    private settingsService: SettingsService
+    private countryConfigService: CountryConfigService
   ) {}
 
   /**
@@ -70,10 +70,13 @@ export class ReferralsService {
       return;
     }
 
-    const bonusAmount = await this.settingsService.get<number>(
-      "referral_bonus_ngn",
-      500
+    const referrer = await this.usersRepository.findOne({
+      where: { id: referral.referrerId },
+    });
+    const countryConfig = await this.countryConfigService.get(
+      referrer?.country
     );
+    const bonusAmount = countryConfig.referralBonus;
 
     await this.walletService.credit(
       referral.referrerId,

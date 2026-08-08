@@ -43,10 +43,38 @@ export class PaymentsController {
     );
   }
 
+  @Get("business-credit-packages")
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: "List business errand-credit packages (pay X, get X+bonus% in wallet)",
+  })
+  async listBusinessCreditPackages() {
+    return this.paymentsService.listBusinessCreditPackages();
+  }
+
+  @Post("business-credit-packages/:packageId/purchase")
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: "Purchase a business errand-credit package" })
+  async purchaseBusinessCredits(
+    @Param("packageId") packageId: string,
+    @Request() req
+  ) {
+    return this.paymentsService.purchaseBusinessCredits(
+      req.user.id,
+      req.user.email,
+      packageId
+    );
+  }
+
   @Post("verify/:reference")
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({ summary: "Verify a payment transaction" })
-  async verify(@Param("reference") reference: string) {
-    return this.paymentsService.verifyPayment(reference);
+  async verify(@Param("reference") reference: string, @Request() req) {
+    return this.paymentsService.verifyPayment(reference, req.user.id);
   }
 
   @Post("webhook")

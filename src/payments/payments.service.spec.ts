@@ -1,8 +1,7 @@
 import { Test, TestingModule } from "@nestjs/testing";
 import { getRepositoryToken } from "@nestjs/typeorm";
-import { ConfigService } from "@nestjs/config";
 import { EventEmitter2 } from "@nestjs/event-emitter";
-import { BadRequestException } from "@nestjs/common";
+import { BadRequestException, ForbiddenException } from "@nestjs/common";
 import { DataSource } from "typeorm";
 import { PaymentsService } from "./payments.service";
 import { PaystackService } from "./services/paystack.service";
@@ -11,6 +10,9 @@ import { Errand } from "../errands/entities/errand.entity";
 import { User } from "../users/entities/user.entity";
 import { KYC, KYCStatus } from "../users/entities/kyc.entity";
 import { WalletService } from "../wallet/wallet.service";
+import { PaymentGatewayRegistry } from "./payment-gateway.registry";
+import { CountryConfigService } from "../settings/country-config.service";
+import { SettingsService } from "../settings/settings.service";
 import {
   WalletTransactionStatus,
   WalletTransactionType,
@@ -25,6 +27,27 @@ describe("PaymentsService", () => {
   let paystackService: jest.Mocked<PaystackService>;
   let eventEmitter: jest.Mocked<EventEmitter2>;
   let walletService: jest.Mocked<WalletService>;
+  let countryConfigService: jest.Mocked<CountryConfigService>;
+  let settingsService: jest.Mocked<SettingsService>;
+
+  const defaultCountryConfig = {
+    country: "Nigeria",
+    currencyCode: "NGN",
+    currencySymbol: "₦",
+    boostPrice: 2500,
+    platformFeePercent: 10,
+    minWithdrawalAmount: 2000,
+    withdrawalFeePercent: 3.5,
+    referralBonus: 500,
+    priorityPriceThreshold: 20000,
+    subscriptionPrices: { monthly: 1500, quarterly: 4000, semi_annual: 7000, annual: 12000 },
+    lightKycPriceThreshold: 5000,
+    proPlatformFeePercent: 5,
+    surgeThresholdOpenErrands: 50,
+    surgeMultiplier: 1.5,
+    paymentGatewayProvider: "paystack",
+    isActive: true,
+  };
 
   const errand = {
     id: "errand-1",
@@ -51,7 +74,10 @@ describe("PaymentsService", () => {
           provide: getRepositoryToken(Errand),
           useValue: { findOne: jest.fn() },
         },
-        { provide: getRepositoryToken(User), useValue: { findOne: jest.fn() } },
+        {
+          provide: getRepositoryToken(User),
+          useValue: { findOne: jest.fn().mockResolvedValue({ id: "runner-1", country: "Nigeria" }) },
+        },
         {
           provide: getRepositoryToken(KYC),
           useValue: { findOne: jest.fn(), save: jest.fn() },
@@ -59,6 +85,8 @@ describe("PaymentsService", () => {
         {
           provide: PaystackService,
           useValue: {
+            initializePayment: jest.fn(),
+            verifyPayment: jest.fn(),
             resolveBankCode: jest.fn(),
             createTransferRecipient: jest.fn(),
             initiateTransfer: jest.fn(),
@@ -66,8 +94,24 @@ describe("PaymentsService", () => {
           },
         },
         {
-          provide: ConfigService,
-          useValue: { get: jest.fn((key: string, fallback?: any) => fallback) },
+          provide: PaymentGatewayRegistry,
+          useValue: {
+            resolve: jest.fn(),
+          },
+        },
+        {
+          provide: CountryConfigService,
+          useValue: {
+            get: jest.fn().mockResolvedValue(defaultCountryConfig),
+          },
+        },
+        {
+          provide: SettingsService,
+          useValue: {
+            get: jest.fn((key: string, fallback: any) =>
+              Promise.resolve(fallback)
+            ),
+          },
         },
         { provide: EventEmitter2, useValue: { emit: jest.fn() } },
         { provide: DataSource, useValue: {} },
@@ -76,6 +120,7 @@ describe("PaymentsService", () => {
           useValue: {
             findEarningByErrandId: jest.fn(),
             findErrandPaymentByErrandId: jest.fn(),
+            findBoostByErrandId: jest.fn(),
             credit: jest.fn(),
             debit: jest.fn(),
             getBalance: jest.fn(),
@@ -99,6 +144,10 @@ describe("PaymentsService", () => {
     paystackService = module.get(PaystackService);
     eventEmitter = module.get(EventEmitter2);
     walletService = module.get(WalletService);
+    countryConfigService = module.get(CountryConfigService);
+    settingsService = module.get(SettingsService);
+    const paymentGatewayRegistry = module.get(PaymentGatewayRegistry);
+    (paymentGatewayRegistry.resolve as jest.Mock).mockReturnValue(paystackService);
   });
 
   describe("processPayout", () => {
@@ -147,28 +196,119 @@ describe("PaymentsService", () => {
       );
       expect(result.amount).toBe(900);
       expect(paystackService.initiateTransfer).not.toHaveBeenCalled();
-      expect(usersRepo.findOne).not.toHaveBeenCalled();
       expect(kycRepo.findOne).not.toHaveBeenCalled();
     });
 
-    it("honors a custom PLATFORM_FEE_PERCENT", async () => {
-      const configService: any = service["configService"];
-      configService.get.mockImplementation((key: string, fallback?: any) =>
-        key === "PLATFORM_FEE_PERCENT" ? 20 : fallback
-      );
+    it("charges a currently-Pro runner the lower proPlatformFeePercent instead of the standard fee", async () => {
       walletService.findEarningByErrandId.mockResolvedValue(null);
       errandsRepo.findOne.mockResolvedValue(errand);
-      walletService.credit.mockResolvedValue({ amount: 800 } as any);
+      usersRepo.findOne.mockResolvedValue({
+        id: "runner-1",
+        country: "Nigeria",
+        proExpiresAt: new Date(Date.now() + 60_000),
+      });
+      walletService.credit.mockResolvedValue({ amount: 950 } as any);
+
+      const result = await service.processPayout("errand-1");
+
+      // price 1000 - 5% Pro fee (50) = 950
+      expect(walletService.credit).toHaveBeenCalledWith(
+        "runner-1",
+        950,
+        WalletTransactionType.EARNING,
+        expect.any(Object)
+      );
+      expect(result.amount).toBe(950);
+    });
+
+    it("charges the standard platformFeePercent once a runner's Pro subscription has expired", async () => {
+      walletService.findEarningByErrandId.mockResolvedValue(null);
+      errandsRepo.findOne.mockResolvedValue(errand);
+      usersRepo.findOne.mockResolvedValue({
+        id: "runner-1",
+        country: "Nigeria",
+        proExpiresAt: new Date(Date.now() - 60_000),
+      });
+      walletService.credit.mockResolvedValue({ amount: 900 } as any);
 
       const result = await service.processPayout("errand-1");
 
       expect(walletService.credit).toHaveBeenCalledWith(
         "runner-1",
-        800,
+        900,
         WalletTransactionType.EARNING,
         expect.any(Object)
       );
-      expect(result.amount).toBe(800);
+      expect(result.amount).toBe(900);
+    });
+
+    it("adds the tip on top in full, without the platform fee touching it", async () => {
+      walletService.findEarningByErrandId.mockResolvedValue(null);
+      errandsRepo.findOne.mockResolvedValue({ ...errand, tip: 150 });
+      walletService.credit.mockResolvedValue({ amount: 1050 } as any);
+
+      const result = await service.processPayout("errand-1");
+
+      // price 1000 - 10% fee (100) + tip 150 = 1050
+      expect(walletService.credit).toHaveBeenCalledWith(
+        "runner-1",
+        1050,
+        WalletTransactionType.EARNING,
+        expect.any(Object)
+      );
+      expect(result.amount).toBe(1050);
+    });
+  });
+
+  describe("forfeitErrandFunds", () => {
+    it("reverses both the errand payment and the boost transaction when boosted", async () => {
+      walletService.findErrandPaymentByErrandId.mockResolvedValue({
+        id: "payment-tx",
+        status: WalletTransactionStatus.SUCCESS,
+      } as any);
+      walletService.findBoostByErrandId.mockResolvedValue({
+        id: "boost-tx",
+        status: WalletTransactionStatus.SUCCESS,
+      } as any);
+
+      await service.forfeitErrandFunds("errand-1", "Timed errand deadline missed");
+
+      expect(walletService.reverseTransaction).toHaveBeenCalledWith(
+        "payment-tx",
+        "Timed errand deadline missed"
+      );
+      expect(walletService.reverseTransaction).toHaveBeenCalledWith(
+        "boost-tx",
+        "Timed errand deadline missed"
+      );
+    });
+
+    it("only reverses the errand payment when the errand wasn't boosted", async () => {
+      walletService.findErrandPaymentByErrandId.mockResolvedValue({
+        id: "payment-tx",
+        status: WalletTransactionStatus.SUCCESS,
+      } as any);
+      walletService.findBoostByErrandId.mockResolvedValue(null);
+
+      await service.forfeitErrandFunds("errand-1", "Timed errand deadline missed");
+
+      expect(walletService.reverseTransaction).toHaveBeenCalledTimes(1);
+      expect(walletService.reverseTransaction).toHaveBeenCalledWith(
+        "payment-tx",
+        "Timed errand deadline missed"
+      );
+    });
+
+    it("skips reversal for transactions that are missing or not SUCCESS", async () => {
+      walletService.findErrandPaymentByErrandId.mockResolvedValue(null);
+      walletService.findBoostByErrandId.mockResolvedValue({
+        id: "boost-tx",
+        status: WalletTransactionStatus.FAILED,
+      } as any);
+
+      await service.forfeitErrandFunds("errand-1", "Timed errand deadline missed");
+
+      expect(walletService.reverseTransaction).not.toHaveBeenCalled();
     });
   });
 
@@ -191,6 +331,7 @@ describe("PaymentsService", () => {
       status: KYCStatus.APPROVED,
       bankAccountNumber: "0123456789",
       bankName: "Access Bank",
+      bankAccountName: "Runner One",
       paystackRecipientCode: null,
     };
 
@@ -388,6 +529,78 @@ describe("PaymentsService", () => {
     });
   });
 
+  describe("listBusinessCreditPackages", () => {
+    it("returns the default set of credit packages when unconfigured", async () => {
+      const result = await service.listBusinessCreditPackages();
+
+      expect(result.map((p) => p.id)).toEqual(["starter", "growth", "scale"]);
+    });
+
+    it("returns an admin-configured package list instead of the default", async () => {
+      settingsService.get.mockResolvedValueOnce([
+        { id: "custom", label: "Custom", payAmount: 1000, bonusPercent: 5 },
+      ]);
+
+      const result = await service.listBusinessCreditPackages();
+
+      expect(result.map((p) => p.id)).toEqual(["custom"]);
+    });
+  });
+
+  describe("purchaseBusinessCredits", () => {
+    it("throws for an unknown package id", async () => {
+      await expect(
+        service.purchaseBusinessCredits(
+          "requester-1",
+          "user@example.com",
+          "unknown"
+        )
+      ).rejects.toThrow(BadRequestException);
+      expect(walletService.createPendingDeposit).not.toHaveBeenCalled();
+    });
+
+    it("charges payAmount via the gateway but credits the bonus-inclusive amount to the wallet", async () => {
+      paystackService.initializePayment = jest.fn().mockResolvedValue({
+        status: true,
+        message: "ok",
+        data: {
+          authorization_url: "https://paystack.test/pay",
+          access_code: "abc",
+          reference: "business-credit-ref",
+        },
+      });
+
+      const result = await service.purchaseBusinessCredits(
+        "requester-1",
+        "user@example.com",
+        "starter"
+      );
+
+      expect(paystackService.initializePayment).toHaveBeenCalledWith(
+        "user@example.com",
+        20000,
+        expect.any(String),
+        expect.objectContaining({
+          purpose: "business_credit_purchase",
+          packageId: "starter",
+          creditAmount: 22000,
+        })
+      );
+      expect(walletService.createPendingDeposit).toHaveBeenCalledWith(
+        "requester-1",
+        22000,
+        "business-credit-ref",
+        WalletTransactionType.BUSINESS_CREDIT_PURCHASE
+      );
+      expect(result).toEqual({
+        authorizationUrl: "https://paystack.test/pay",
+        reference: "business-credit-ref",
+        payAmount: 20000,
+        creditAmount: 22000,
+      });
+    });
+  });
+
   describe("verifyPayment", () => {
     it("confirms a pending deposit when Paystack reports success", async () => {
       paystackService.verifyPayment = jest.fn().mockResolvedValue({
@@ -403,14 +616,38 @@ describe("PaymentsService", () => {
       });
       walletService.confirmDeposit.mockResolvedValue({
         id: "tx-1",
+        userId: "requester-1",
         type: WalletTransactionType.DEPOSIT,
       } as any);
 
-      const result = await service.verifyPayment("deposit-ref");
+      const result = await service.verifyPayment("deposit-ref", "requester-1");
 
       expect(walletService.confirmDeposit).toHaveBeenCalledWith("deposit-ref");
       expect(result.type).toBe(WalletTransactionType.DEPOSIT);
       expect(paymentsRepo.findOne).not.toHaveBeenCalled();
+    });
+
+    it("rejects when the deposit belongs to a different user", async () => {
+      paystackService.verifyPayment = jest.fn().mockResolvedValue({
+        status: true,
+        message: "ok",
+        data: {
+          amount: 500000,
+          currency: "NGN",
+          status: "success",
+          reference: "deposit-ref",
+          customer: {},
+        },
+      });
+      walletService.confirmDeposit.mockResolvedValue({
+        id: "tx-1",
+        userId: "someone-else",
+        type: WalletTransactionType.DEPOSIT,
+      } as any);
+
+      await expect(
+        service.verifyPayment("deposit-ref", "requester-1")
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it("falls back to the Payment table when the reference isn't a deposit", async () => {
@@ -428,57 +665,39 @@ describe("PaymentsService", () => {
       walletService.confirmDeposit.mockResolvedValue(null);
       paymentsRepo.findOne.mockResolvedValue({
         id: "payment-1",
+        userId: "requester-1",
         type: PaymentType.BOOST,
         status: PaymentStatus.PENDING,
       });
 
-      const result = await service.verifyPayment("boost-ref");
+      const result = await service.verifyPayment("boost-ref", "requester-1");
 
       expect(result.status).toBe(PaymentStatus.SUCCESS);
     });
-  });
 
-  describe("initializeBoostPayment", () => {
-    it("throws when the errand does not exist", async () => {
-      errandsRepo.findOne.mockResolvedValue(null);
-
-      await expect(
-        service.initializeBoostPayment(
-          "errand-1",
-          "requester-1",
-          "user@example.com",
-          2500
-        )
-      ).rejects.toThrow("Errand not found");
-    });
-
-    it("creates a PENDING BOOST payment record with a system-determined amount", async () => {
-      errandsRepo.findOne.mockResolvedValue(errand);
-      paystackService.initializePayment = jest.fn().mockResolvedValue({
+    it("rejects when the Payment-table fallback belongs to a different user", async () => {
+      paystackService.verifyPayment = jest.fn().mockResolvedValue({
         status: true,
         message: "ok",
         data: {
-          authorization_url: "https://paystack.test/pay",
-          access_code: "abc",
+          amount: 250000,
+          currency: "NGN",
+          status: "success",
           reference: "boost-ref",
+          customer: {},
         },
       });
+      walletService.confirmDeposit.mockResolvedValue(null);
+      paymentsRepo.findOne.mockResolvedValue({
+        id: "payment-1",
+        userId: "someone-else",
+        type: PaymentType.BOOST,
+        status: PaymentStatus.PENDING,
+      });
 
-      const result = await service.initializeBoostPayment(
-        "errand-1",
-        "requester-1",
-        "user@example.com",
-        2500
-      );
-
-      expect(paymentsRepo.create).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: PaymentType.BOOST,
-          amount: 2500,
-          status: PaymentStatus.PENDING,
-        })
-      );
-      expect(result.authorizationUrl).toBe("https://paystack.test/pay");
+      await expect(
+        service.verifyPayment("boost-ref", "requester-1")
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 

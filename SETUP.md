@@ -72,9 +72,27 @@ script:
 npm run admin:create -- --email=you@example.com --name="Ops" --password="a-strong-password"
 ```
 
-Then `POST /admin/auth/login` with that email/password to get an admin
-access token (separate from, and not interchangeable with, customer JWTs -
-see `ADMIN_JWT_SECRET` in `.env`).
+Admin login is now **two steps**, same shape as the customer new-device-login
+flow:
+
+1. `POST /admin/auth/login { email, password }` - on success, returns
+   `{ requiresOtp: true, message }` (never a token directly) and emails a
+   6-digit code to the admin's address.
+2. `POST /admin/auth/verify-otp { email, code }` - returns the admin access
+   token (separate from, and not interchangeable with, customer JWTs - see
+   `ADMIN_JWT_SECRET` in `.env`).
+
+If the code expires or never arrives, `POST /admin/auth/resend-otp { email }`
+issues a fresh one without re-entering the password.
+
+**Default OTP codes while the mobile app is being built**: with
+`OTP_STATIC_CODE_USER`/`OTP_STATIC_CODE_ADMIN` set in `.env`, every OTP
+request uses a fixed code instead of a random one - `425621` for all
+user-facing flows (signup, password reset, new-device login, bank-change) and
+`983467` for admin login. This lets testers use the app without needing to
+read an email or the server console for a code. **Unset both once real users
+are on the app** - the server refuses to boot with either set if
+`NODE_ENV=production`.
 
 ## 3. Frontend integration requirements
 

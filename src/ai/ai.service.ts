@@ -181,6 +181,32 @@ export class AiService {
     return result.title;
   }
 
+  /**
+   * Feature E: classifies free-form text against a fixed, caller-provided
+   * set of intents (e.g. the WhatsApp bot's supported menu actions) - bounded
+   * extraction, not open-ended chat. Returns "unknown" if nothing fits well
+   * enough for the model to commit to one of the given options.
+   */
+  async classifyIntent(
+    text: string,
+    intents: string[]
+  ): Promise<{ intent: string }> {
+    return this.callTool(
+      "classify_intent",
+      "Classify free-form user text into exactly one of a fixed set of supported intents.",
+      {
+        type: "object",
+        properties: {
+          intent: { type: "string", enum: [...intents, "unknown"] },
+        },
+        required: ["intent"],
+        additionalProperties: false,
+      },
+      `You classify a user's message into exactly one of these intents: ${intents.join(", ")}. If none clearly fit, respond with "unknown" rather than guessing.`,
+      text
+    );
+  }
+
   /** Feature D: up to 3 quick-reply suggestions based on recent conversation context. */
   async generateSmartReplies(
     recentMessages: { fromUserId: string; text: string }[]

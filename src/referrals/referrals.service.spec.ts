@@ -5,14 +5,14 @@ import { Referral, ReferralStatus } from "./entities/referral.entity";
 import { User } from "../users/entities/user.entity";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
-import { SettingsService } from "../settings/settings.service";
+import { CountryConfigService } from "../settings/country-config.service";
 
 describe("ReferralsService", () => {
   let service: ReferralsService;
   let referralsRepo: any;
   let usersRepo: any;
   let walletService: jest.Mocked<WalletService>;
-  let settingsService: jest.Mocked<SettingsService>;
+  let countryConfigService: jest.Mocked<CountryConfigService>;
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -36,8 +36,8 @@ describe("ReferralsService", () => {
           useValue: { credit: jest.fn() },
         },
         {
-          provide: SettingsService,
-          useValue: { get: jest.fn((key: string, fallback: any) => fallback) },
+          provide: CountryConfigService,
+          useValue: { get: jest.fn().mockResolvedValue({ referralBonus: 500 }) },
         },
       ],
     }).compile();
@@ -46,7 +46,7 @@ describe("ReferralsService", () => {
     referralsRepo = module.get(getRepositoryToken(Referral));
     usersRepo = module.get(getRepositoryToken(User));
     walletService = module.get(WalletService);
-    settingsService = module.get(SettingsService);
+    countryConfigService = module.get(CountryConfigService);
   });
 
   describe("createPending", () => {
@@ -114,11 +114,11 @@ describe("ReferralsService", () => {
         referredUserId: "referred-1",
         status: ReferralStatus.PENDING,
       });
-      settingsService.get.mockResolvedValue(500);
+      usersRepo.findOne.mockResolvedValue({ id: "referrer-1", country: "Nigeria" });
 
       await service.completeIfPending("referred-1");
 
-      expect(usersRepo.findOne).not.toHaveBeenCalled();
+      expect(countryConfigService.get).toHaveBeenCalledWith("Nigeria");
       expect(walletService.credit).toHaveBeenCalledWith(
         "referrer-1",
         500,

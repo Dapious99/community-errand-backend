@@ -14,6 +14,7 @@ import { Location } from "./location.entity";
 import { MediaAttachment } from "./media-attachment.entity";
 import { Message } from "../../messages/entities/message.entity";
 import { Rating } from "../../ratings/entities/rating.entity";
+import { ErrandConcern } from "./errand-concern.entity";
 import { DecimalColumnTransformer } from "../../common/transformers/decimal.transformer";
 
 export enum ErrandStatus {
@@ -145,4 +146,10 @@ export class Errand {
 
   @OneToMany(() => Rating, (rating) => rating.errand)
   ratings: Rating[];
+
+  @OneToMany(() => ErrandConcern, (concern) => concern.errand)
+  concerns: ErrandConcern[];
+
+  /** Transient, not persisted - set by ErrandsService for any endpoint returning a list/detail view, so the mobile card can render a concern icon without a second round-trip. */
+  hasOpenConcern?: boolean;
 }

@@ -9,25 +9,10 @@ import {
 import { User } from "../users/entities/user.entity";
 import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
+import { CountryConfigService } from "../settings/country-config.service";
 import { SettingsService } from "../settings/settings.service";
 
-const PLAN_PRICE_SETTINGS: Record<
-  SubscriptionPlan,
-  { key: string; default: number }
-> = {
-  [SubscriptionPlan.MONTHLY]: { key: "pro_price_monthly_ngn", default: 1500 },
-  [SubscriptionPlan.QUARTERLY]: {
-    key: "pro_price_quarterly_ngn",
-    default: 4000,
-  },
-  [SubscriptionPlan.SEMI_ANNUAL]: {
-    key: "pro_price_semi_annual_ngn",
-    default: 7000,
-  },
-  [SubscriptionPlan.ANNUAL]: { key: "pro_price_annual_ngn", default: 12000 },
-};
-
-const PLAN_DURATION_DAYS: Record<SubscriptionPlan, number> = {
+const DEFAULT_PLAN_DURATION_DAYS: Record<SubscriptionPlan, number> = {
   [SubscriptionPlan.MONTHLY]: 30,
   [SubscriptionPlan.QUARTERLY]: 90,
   [SubscriptionPlan.SEMI_ANNUAL]: 180,
@@ -44,16 +29,24 @@ export class SubscriptionsService {
     @InjectRepository(User)
     private usersRepository: Repository<User>,
     private walletService: WalletService,
+    private countryConfigService: CountryConfigService,
     private settingsService: SettingsService
   ) {}
 
-  async getPlanPrice(plan: SubscriptionPlan): Promise<number> {
-    const { key, default: fallback } = PLAN_PRICE_SETTINGS[plan];
-    return this.settingsService.get<number>(key, fallback);
+  async getPlanPrice(
+    plan: SubscriptionPlan,
+    country?: string | null
+  ): Promise<number> {
+    const config = await this.countryConfigService.get(country);
+    return config.subscriptionPrices[plan];
   }
 
-  getPlanDurationDays(plan: SubscriptionPlan): number {
-    return PLAN_DURATION_DAYS[plan];
+  async getPlanDurationDays(plan: SubscriptionPlan): Promise<number> {
+    const durations = await this.settingsService.get(
+      "subscription_plan_duration_days",
+      DEFAULT_PLAN_DURATION_DAYS
+    );
+    return durations[plan];
   }
 
   /**
@@ -73,8 +66,8 @@ export class SubscriptionsService {
       throw new NotFoundException("User not found");
     }
 
-    const price = await this.getPlanPrice(plan);
-    const durationDays = this.getPlanDurationDays(plan);
+    const price = await this.getPlanPrice(plan, user.country);
+    const durationDays = await this.getPlanDurationDays(plan);
 
     const transaction = await this.walletService.debit(
       userId,

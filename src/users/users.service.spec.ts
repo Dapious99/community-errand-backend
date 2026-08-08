@@ -3,22 +3,13 @@ import { getRepositoryToken } from "@nestjs/typeorm";
 import { ConflictException } from "@nestjs/common";
 import { UsersService } from "./users.service";
 import { User } from "./entities/user.entity";
-import { KYC, KYCStatus } from "./entities/kyc.entity";
 import { RatingsService } from "../ratings/ratings.service";
-import { OtpService } from "../otp/otp.service";
-import { DojahService } from "./services/dojah.service";
+import { SettingsService } from "../settings/settings.service";
 
 describe("UsersService", () => {
   let service: UsersService;
   let usersRepo: any;
-  let kycRepo: any;
-  let otpService: jest.Mocked<OtpService>;
-  let dojahService: jest.Mocked<DojahService>;
-
-  const kycDto = {
-    nin: "12345678901",
-    ninImageUrl: "https://example.com/nin.jpg",
-  };
+  let settingsService: jest.Mocked<SettingsService>;
 
   const user = { id: "user-1", email: "user@example.com" };
 
@@ -32,30 +23,16 @@ describe("UsersService", () => {
             findOne: jest.fn().mockResolvedValue(user),
             create: jest.fn((data) => ({ id: "new-user-1", ...data })),
             save: jest.fn((data) => Promise.resolve(data)),
-          },
-        },
-        {
-          provide: getRepositoryToken(KYC),
-          useValue: {
-            findOne: jest.fn(),
-            create: jest.fn((data) => data),
-            save: jest.fn((data) => Promise.resolve({ id: "kyc-1", ...data })),
+            update: jest.fn().mockResolvedValue(undefined),
           },
         },
         { provide: RatingsService, useValue: {} },
         {
-          provide: OtpService,
+          provide: SettingsService,
           useValue: {
-            request: jest.fn().mockResolvedValue(undefined),
-            verify: jest.fn(),
-            resend: jest.fn().mockResolvedValue(undefined),
-          },
-        },
-        {
-          provide: DojahService,
-          useValue: {
-            verifyNin: jest.fn().mockResolvedValue({ verified: true, data: {} }),
-            verifyBvn: jest.fn().mockResolvedValue({ verified: true, data: {} }),
+            get: jest.fn((key: string, fallback: any) =>
+              Promise.resolve(fallback)
+            ),
           },
         },
       ],
@@ -63,9 +40,7 @@ describe("UsersService", () => {
 
     service = module.get(UsersService);
     usersRepo = module.get(getRepositoryToken(User));
-    kycRepo = module.get(getRepositoryToken(KYC));
-    otpService = module.get(OtpService);
-    dojahService = module.get(DojahService);
+    settingsService = module.get(SettingsService);
   });
 
   describe("create", () => {
@@ -109,123 +84,6 @@ describe("UsersService", () => {
       });
 
       expect(result.referredByUserId).toBeUndefined();
-    });
-  });
-
-  describe("submitKyc", () => {
-    it("creates a fresh PENDING KYC record when none exists yet", async () => {
-      kycRepo.findOne.mockResolvedValue(null);
-
-      const result: any = await service.submitKyc(user.id, {
-        ...kycDto,
-        bankAccountNumber: "0123456789",
-        bankName: "Access Bank",
-      });
-
-      expect(result.status).toBe(KYCStatus.PENDING);
-      expect(otpService.request).not.toHaveBeenCalled();
-      expect(dojahService.verifyNin).toHaveBeenCalledWith(kycDto.nin);
-    });
-
-    it("re-submitting a REJECTED KYC applies changes directly and resets to PENDING", async () => {
-      kycRepo.findOne.mockResolvedValue({
-        userId: user.id,
-        status: KYCStatus.REJECTED,
-        bankAccountNumber: "111",
-        bankName: "Old Bank",
-      });
-
-      const result: any = await service.submitKyc(user.id, {
-        ...kycDto,
-        bankAccountNumber: "222",
-        bankName: "New Bank",
-      });
-
-      expect(result.status).toBe(KYCStatus.PENDING);
-      expect(result.bankAccountNumber).toBe("222");
-      expect(otpService.request).not.toHaveBeenCalled();
-    });
-
-    it("requires OTP confirmation instead of applying a bank change on an APPROVED KYC", async () => {
-      kycRepo.findOne.mockResolvedValue({
-        userId: user.id,
-        status: KYCStatus.APPROVED,
-        bankAccountNumber: "111",
-        bankName: "Old Bank",
-      });
-
-      const result: any = await service.submitKyc(user.id, {
-        ...kycDto,
-        bankAccountNumber: "999",
-        bankName: "Old Bank",
-      });
-
-      expect(result.requiresConfirmation).toBe(true);
-      expect(otpService.request).toHaveBeenCalledWith(
-        "bank_change",
-        user.id,
-        user.email,
-        expect.objectContaining({ pendingChanges: expect.any(Object) })
-      );
-      expect(kycRepo.save).not.toHaveBeenCalled();
-    });
-
-    it("applies a non-bank edit to an APPROVED KYC directly, keeping it APPROVED", async () => {
-      kycRepo.findOne.mockResolvedValue({
-        userId: user.id,
-        status: KYCStatus.APPROVED,
-        bankAccountNumber: "111",
-        bankName: "Old Bank",
-      });
-
-      const result: any = await service.submitKyc(user.id, {
-        ...kycDto,
-        idCardUrl: "https://example.com/new-id.jpg",
-      });
-
-      expect(result.status).toBe(KYCStatus.APPROVED);
-      expect(otpService.request).not.toHaveBeenCalled();
-    });
-  });
-
-  describe("resendBankChangeCode", () => {
-    it("resends via the OTP service using the current user's email", async () => {
-      await service.resendBankChangeCode(user.id);
-
-      expect(otpService.resend).toHaveBeenCalledWith(
-        "bank_change",
-        user.id,
-        user.email
-      );
-    });
-
-    it("propagates the error when there's no pending bank change to resend", async () => {
-      otpService.resend.mockRejectedValue(
-        new Error("nothing pending to resend")
-      );
-
-      await expect(service.resendBankChangeCode(user.id)).rejects.toThrow(
-        "nothing pending to resend"
-      );
-    });
-  });
-
-  describe("confirmBankChange", () => {
-    it("applies the pending changes and resets status to PENDING", async () => {
-      otpService.verify.mockResolvedValue({
-        pendingChanges: { bankAccountNumber: "999", bankName: "New Bank" },
-      });
-      kycRepo.findOne.mockResolvedValue({
-        userId: user.id,
-        status: KYCStatus.APPROVED,
-        bankAccountNumber: "111",
-        bankName: "Old Bank",
-      });
-
-      const result = await service.confirmBankChange(user.id, "123456");
-
-      expect(result.bankAccountNumber).toBe("999");
-      expect(result.status).toBe(KYCStatus.PENDING);
     });
   });
 
@@ -278,6 +136,217 @@ describe("UsersService", () => {
       await expect(
         service.update(user.id, { phone: "+2348022222222" } as any)
       ).rejects.toThrow(ConflictException);
+    });
+  });
+
+  describe("recordErrandFailure", () => {
+    it("just increments the streak below the 3-strike threshold", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 1,
+        banEscalationLevel: 0,
+      });
+
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.consecutiveErrandFailures).toBe(2);
+      expect(result.runnerBannedUntil).toBeUndefined();
+      expect(result.permanentlyBannedFromPicking).toBeUndefined();
+    });
+
+    it("issues a 72-hour ban on the 1st escalation and resets the streak", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 2,
+        banEscalationLevel: 0,
+      });
+
+      const before = Date.now();
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.consecutiveErrandFailures).toBe(0);
+      expect(result.banEscalationLevel).toBe(1);
+      expect(result.runnerBannedUntil.getTime() - before).toBeCloseTo(
+        72 * 60 * 60 * 1000,
+        -3
+      );
+    });
+
+    it("issues a 7-day ban on the 2nd escalation", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 2,
+        banEscalationLevel: 1,
+      });
+
+      const before = Date.now();
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.banEscalationLevel).toBe(2);
+      expect(result.runnerBannedUntil.getTime() - before).toBeCloseTo(
+        7 * 24 * 60 * 60 * 1000,
+        -3
+      );
+    });
+
+    it("permanently bans on the 3rd escalation instead of setting a timed ban", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 2,
+        banEscalationLevel: 2,
+      });
+
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.permanentlyBannedFromPicking).toBe(true);
+      expect(result.runnerBannedUntil).toBeUndefined();
+      // Escalation level is left as-is - a lifted permanent ban should go
+      // straight back to permanent on the next violation, not restart at 72h.
+      expect(result.banEscalationLevel).toBe(2);
+    });
+
+    it("honors an admin-configured ban_strike_threshold override", async () => {
+      settingsService.get.mockImplementation((key: string, fallback: any) =>
+        Promise.resolve(key === "ban_strike_threshold" ? 1 : fallback)
+      );
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 0,
+        banEscalationLevel: 0,
+      });
+
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.runnerBannedUntil).toBeInstanceOf(Date);
+      expect(result.consecutiveErrandFailures).toBe(0);
+    });
+
+    it("honors an admin-configured ban_duration_ladder_hours override", async () => {
+      settingsService.get.mockImplementation((key: string, fallback: any) =>
+        Promise.resolve(key === "ban_duration_ladder_hours" ? [1] : fallback)
+      );
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutiveErrandFailures: 2,
+        banEscalationLevel: 0,
+      });
+
+      const before = Date.now();
+      const result = await service.recordErrandFailure(user.id);
+
+      expect(result.runnerBannedUntil.getTime() - before).toBeCloseTo(
+        1 * 60 * 60 * 1000,
+        -3
+      );
+    });
+  });
+
+  describe("liftPermanentBan", () => {
+    it("clears the permanent ban without touching banEscalationLevel", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        permanentlyBannedFromPicking: true,
+        banEscalationLevel: 2,
+        runnerBannedUntil: new Date(),
+      });
+
+      const result = await service.liftPermanentBan(user.id);
+
+      expect(result.permanentlyBannedFromPicking).toBe(false);
+      expect(result.runnerBannedUntil).toBeUndefined();
+      expect(result.banEscalationLevel).toBe(2);
+    });
+  });
+
+  describe("recordPostingFailure", () => {
+    it("just increments the streak below the 3-strike threshold", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutivePostingFailures: 1,
+        postingBanEscalationLevel: 0,
+      });
+
+      const result = await service.recordPostingFailure(user.id);
+
+      expect(result.consecutivePostingFailures).toBe(2);
+      expect(result.requesterBannedUntil).toBeUndefined();
+      expect(result.permanentlyBannedFromPosting).toBeUndefined();
+    });
+
+    it("issues a 72-hour posting ban on the 1st escalation and resets the streak", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutivePostingFailures: 2,
+        postingBanEscalationLevel: 0,
+      });
+
+      const before = Date.now();
+      const result = await service.recordPostingFailure(user.id);
+
+      expect(result.consecutivePostingFailures).toBe(0);
+      expect(result.postingBanEscalationLevel).toBe(1);
+      expect(result.requesterBannedUntil.getTime() - before).toBeCloseTo(
+        72 * 60 * 60 * 1000,
+        -3
+      );
+    });
+
+    it("issues a 7-day posting ban on the 2nd escalation", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutivePostingFailures: 2,
+        postingBanEscalationLevel: 1,
+      });
+
+      const before = Date.now();
+      const result = await service.recordPostingFailure(user.id);
+
+      expect(result.postingBanEscalationLevel).toBe(2);
+      expect(result.requesterBannedUntil.getTime() - before).toBeCloseTo(
+        7 * 24 * 60 * 60 * 1000,
+        -3
+      );
+    });
+
+    it("permanently bans posting on the 3rd escalation instead of setting a timed ban", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        consecutivePostingFailures: 2,
+        postingBanEscalationLevel: 2,
+      });
+
+      const result = await service.recordPostingFailure(user.id);
+
+      expect(result.permanentlyBannedFromPosting).toBe(true);
+      expect(result.requesterBannedUntil).toBeUndefined();
+      expect(result.postingBanEscalationLevel).toBe(2);
+    });
+  });
+
+  describe("resetPostingFailures", () => {
+    it("zeroes the consecutive-cancellation streak", async () => {
+      await service.resetPostingFailures(user.id);
+
+      expect(usersRepo.update).toHaveBeenCalledWith(user.id, {
+        consecutivePostingFailures: 0,
+      });
+    });
+  });
+
+  describe("liftPermanentPostingBan", () => {
+    it("clears the permanent posting ban without touching postingBanEscalationLevel", async () => {
+      usersRepo.findOne.mockResolvedValue({
+        ...user,
+        permanentlyBannedFromPosting: true,
+        postingBanEscalationLevel: 2,
+        requesterBannedUntil: new Date(),
+      });
+
+      const result = await service.liftPermanentPostingBan(user.id);
+
+      expect(result.permanentlyBannedFromPosting).toBe(false);
+      expect(result.requesterBannedUntil).toBeUndefined();
+      expect(result.postingBanEscalationLevel).toBe(2);
     });
   });
 });

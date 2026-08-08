@@ -21,6 +21,7 @@ import { OtpService } from "../otp/otp.service";
 import { OtpPurpose } from "../otp/otp-purpose.enum";
 import { TrustedDevice } from "./entities/trusted-device.entity";
 import { ReferralsService } from "../referrals/referrals.service";
+import { CountryConfigService } from "../settings/country-config.service";
 
 @Injectable()
 export class AuthService {
@@ -32,6 +33,7 @@ export class AuthService {
     private configService: ConfigService,
     private otpService: OtpService,
     private referralsService: ReferralsService,
+    private countryConfigService: CountryConfigService,
     @InjectRepository(TrustedDevice)
     private trustedDevicesRepository: Repository<TrustedDevice>
   ) {}
@@ -70,6 +72,7 @@ export class AuthService {
     }
 
     const tokens = await this.generateTokens(user.id, user.email);
+    const countryConfig = await this.countryConfigService.get(user.country);
 
     return {
       user: {
@@ -79,7 +82,9 @@ export class AuthService {
         role: user.role,
         verified: user.verified,
         referralCode: user.referralCode,
+        country: user.country,
       },
+      countryConfig,
       ...tokens,
     };
   }
@@ -122,6 +127,7 @@ export class AuthService {
     await this.trustedDevicesRepository.save(isDeviceTrusted);
 
     const tokens = await this.generateTokens(user.id, user.email);
+    const countryConfig = await this.countryConfigService.get(user.country);
 
     return {
       user: {
@@ -132,7 +138,9 @@ export class AuthService {
         verified: user.verified,
         ratingAvg: user.ratingAvg,
         avatarUrl: user.avatarUrl,
+        country: user.country,
       },
+      countryConfig,
       ...tokens,
     };
   }
@@ -180,6 +188,7 @@ export class AuthService {
 
     await this.trustDevice(user.id, deviceId);
     const tokens = await this.generateTokens(user.id, user.email);
+    const countryConfig = await this.countryConfigService.get(user.country);
 
     return {
       user: {
@@ -190,7 +199,9 @@ export class AuthService {
         verified: user.verified,
         ratingAvg: user.ratingAvg,
         avatarUrl: user.avatarUrl,
+        country: user.country,
       },
+      countryConfig,
       ...tokens,
     };
   }

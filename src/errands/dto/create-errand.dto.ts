@@ -7,6 +7,7 @@ import {
   IsBoolean,
   ValidateNested,
   Min,
+  Max,
   MinLength,
   IsDateString,
 } from "class-validator";
@@ -71,12 +72,14 @@ export class CreateErrandDto {
   @ApiProperty()
   @IsNumber()
   @Min(1)
+  @Max(10_000_000)
   price: number;
 
   @ApiPropertyOptional()
   @IsOptional()
   @IsNumber()
   @Min(0)
+  @Max(1_000_000)
   tip?: number;
 
   @ApiPropertyOptional({

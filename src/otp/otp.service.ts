@@ -28,6 +28,10 @@ const EMAIL_COPY: Record<OtpPurpose, { subject: string; description: string }> =
       subject: "Confirm your bank detail change",
       description: "confirm a change to your payout bank details",
     },
+    [OtpPurpose.ADMIN_LOGIN_VERIFICATION]: {
+      subject: "Verify your admin login",
+      description: "confirm this admin login",
+    },
   };
 
 @Injectable()
@@ -41,6 +45,11 @@ export class OtpService {
     string,
     { value: string; expiresAt: number }
   >();
+  // Fixed codes for early testing (mobile app in progress, no real users
+  // yet) so every OTP-gated flow can be completed without reading email.
+  // Unset OTP_STATIC_CODE_USER/OTP_STATIC_CODE_ADMIN once real users are live.
+  private readonly staticUserCode?: string;
+  private readonly staticAdminCode?: string;
 
   constructor(
     private redisService: RedisService,
@@ -48,6 +57,12 @@ export class OtpService {
     private configService: ConfigService
   ) {
     this.bypassEnabled = this.configService.get<boolean>("OTP_BYPASS", false);
+    this.staticUserCode = this.configService.get<string>(
+      "OTP_STATIC_CODE_USER"
+    );
+    this.staticAdminCode = this.configService.get<string>(
+      "OTP_STATIC_CODE_ADMIN"
+    );
 
     if (this.bypassEnabled) {
       if (this.configService.get<string>("NODE_ENV") === "production") {
@@ -59,6 +74,27 @@ export class OtpService {
         "OTP_BYPASS is enabled - codes are kept in memory and logged to the console instead of Redis/email. Turn this off once REDIS_URL/RESEND_API_KEY are configured."
       );
     }
+
+    if (this.staticUserCode || this.staticAdminCode) {
+      if (this.configService.get<string>("NODE_ENV") === "production") {
+        throw new Error(
+          "OTP_STATIC_CODE_USER/OTP_STATIC_CODE_ADMIN must not be set in production - they hand every account the same fixed, guessable code."
+        );
+      }
+      this.logger.warn(
+        "Static OTP codes are enabled - every code request for the matching role returns the same fixed code instead of a random one. Unset OTP_STATIC_CODE_USER/OTP_STATIC_CODE_ADMIN once real users are live."
+      );
+    }
+  }
+
+  private codeFor(purpose: OtpPurpose): string {
+    const staticCode =
+      purpose === OtpPurpose.ADMIN_LOGIN_VERIFICATION
+        ? this.staticAdminCode
+        : this.staticUserCode;
+    return (
+      staticCode ?? crypto.randomInt(0, 1_000_000).toString().padStart(6, "0")
+    );
   }
 
   private getTtlSeconds(): number {
@@ -138,7 +174,7 @@ export class OtpService {
     email: string,
     metadata?: Record<string, any>
   ): Promise<void> {
-    const code = crypto.randomInt(0, 1_000_000).toString().padStart(6, "0");
+    const code = this.codeFor(purpose);
     const ttl = this.getTtlSeconds();
 
     const stored: StoredOtp = { code, metadata };

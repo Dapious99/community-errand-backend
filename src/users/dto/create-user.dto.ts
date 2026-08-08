@@ -14,13 +14,21 @@ export class CreateUserDto {
   @IsEmail()
   email: string;
 
-  @ApiPropertyOptional({ example: "+2348012345678" })
-  @IsOptional()
+  @ApiProperty({ example: "+2348012345678" })
   @IsString()
   @Matches(/^\+?[1-9]\d{1,14}$/, {
     message: "Phone number must be in valid international format",
   })
-  phone?: string;
+  phone: string;
+
+  @ApiProperty({
+    example: "Nigeria",
+    description:
+      "Country the user is based in - drives which currency/payment gateway they see. Only Nigeria is currently supported.",
+  })
+  @IsString()
+  @MinLength(2)
+  country: string;
 
   @ApiProperty({ example: "John Doe" })
   @IsString()

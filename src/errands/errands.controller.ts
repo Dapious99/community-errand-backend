@@ -71,6 +71,15 @@ export class ErrandsController {
     return this.errandsService.findMyErrands(req.user.id);
   }
 
+  @Get("boost-quote")
+  @ApiOperation({
+    summary:
+      "Get the current boost price - surges when many errands are open at once",
+  })
+  async getBoostQuote(@Request() req) {
+    return this.errandsService.getBoostPriceQuote(req.user.id);
+  }
+
   @Get(":id")
   @ApiOperation({ summary: "Get errand by ID" })
   async findOne(@Param("id") id: string) {

@@ -1,4 +1,4 @@
-import { IsEnum, IsNumber, Matches, Min } from "class-validator";
+import { IsEnum, IsNumber, Matches, Max, Min } from "class-validator";
 import { ApiProperty } from "@nestjs/swagger";
 import { NetworkProvider } from "../enums/network-provider.enum";
 
@@ -13,8 +13,11 @@ export class PurchaseAirtimeDto {
   })
   phone: string;
 
+  // 50,000 is a generic sanity ceiling, not VTpass's actual per-network
+  // limit - tighten this to match their real allowed range if it differs.
   @ApiProperty({ example: 500 })
   @IsNumber()
   @Min(50)
+  @Max(50_000)
   amount: number;
 }

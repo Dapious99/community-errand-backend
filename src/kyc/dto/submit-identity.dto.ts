@@ -1,7 +1,7 @@
-import { IsString, IsOptional, MinLength, Matches } from "class-validator";
+import { IsString, IsOptional, Matches } from "class-validator";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
-export class CreateKycDto {
+export class SubmitIdentityDto {
   @ApiProperty({
     example: "12345678901",
     description: "11-digit National Identification Number",
@@ -32,15 +32,4 @@ export class CreateKycDto {
   @IsOptional()
   @IsString()
   idCardUrl?: string;
-
-  @ApiPropertyOptional({ example: "0123456789" })
-  @IsOptional()
-  @IsString()
-  bankAccountNumber?: string;
-
-  @ApiPropertyOptional({ example: "Access Bank" })
-  @IsOptional()
-  @IsString()
-  @MinLength(2)
-  bankName?: string;
 }

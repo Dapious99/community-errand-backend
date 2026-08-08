@@ -86,11 +86,18 @@ export class RatingsService {
   }
 
   async findByUser(userId: string): Promise<Rating[]> {
-    return this.ratingsRepository.find({
-      where: { toUserId: userId },
-      relations: ["fromUser", "errand"],
-      order: { createdAt: "DESC" },
-    });
+    // Select only the fields needed to render a review card - a bare
+    // `relations: ["fromUser"]` would pull the full User row (email, phone,
+    // DOB, address, emergency contacts, etc) into a response anyone can
+    // fetch for anyone via GET /users/:id/ratings.
+    return this.ratingsRepository
+      .createQueryBuilder("rating")
+      .leftJoin("rating.fromUser", "fromUser")
+      .addSelect(["fromUser.id", "fromUser.name", "fromUser.avatarUrl"])
+      .leftJoinAndSelect("rating.errand", "errand")
+      .where("rating.toUserId = :userId", { userId })
+      .orderBy("rating.createdAt", "DESC")
+      .getMany();
   }
 
   async getStats(userId: string) {

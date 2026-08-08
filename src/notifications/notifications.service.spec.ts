@@ -4,6 +4,7 @@ import axios from "axios";
 import { NotificationsService } from "./notifications.service";
 import { PushToken } from "./entities/push-token.entity";
 import { UsersService } from "../users/users.service";
+import { SettingsService } from "../settings/settings.service";
 
 jest.mock("axios");
 const mockedAxios = axios as jest.Mocked<typeof axios>;
@@ -12,6 +13,7 @@ describe("NotificationsService", () => {
   let service: NotificationsService;
   let repo: any;
   let usersService: jest.Mocked<UsersService>;
+  let settingsService: jest.Mocked<SettingsService>;
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -35,12 +37,21 @@ describe("NotificationsService", () => {
             findNearbyProUsers: jest.fn(),
           },
         },
+        {
+          provide: SettingsService,
+          useValue: {
+            get: jest.fn((key: string, fallback: any) =>
+              Promise.resolve(fallback)
+            ),
+          },
+        },
       ],
     }).compile();
 
     service = module.get(NotificationsService);
     repo = module.get(getRepositoryToken(PushToken));
     usersService = module.get(UsersService);
+    settingsService = module.get(SettingsService);
   });
 
   describe("registerToken", () => {
@@ -157,6 +168,29 @@ describe("NotificationsService", () => {
       );
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
     });
+
+    it("honors admin-configured radius/limit overrides", async () => {
+      settingsService.get.mockImplementation((key: string, fallback: any) => {
+        if (key === "notification_runner_radius_km") return Promise.resolve(25);
+        if (key === "notification_runner_result_limit") return Promise.resolve(5);
+        return Promise.resolve(fallback);
+      });
+      usersService.findNearbyTopRatedRunners.mockResolvedValue([]);
+
+      await service.notifyNearbyTopRatedRunners({
+        latitude: 6.5,
+        longitude: 3.4,
+        title: "New boosted errand nearby!",
+        body: "Buy groceries",
+      });
+
+      expect(usersService.findNearbyTopRatedRunners).toHaveBeenCalledWith(
+        6.5,
+        3.4,
+        25,
+        5
+      );
+    });
   });
 
   describe("notifyNearbyProUsers", () => {
@@ -198,6 +232,29 @@ describe("NotificationsService", () => {
         50
       );
       expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+    });
+
+    it("honors admin-configured radius/limit overrides", async () => {
+      settingsService.get.mockImplementation((key: string, fallback: any) => {
+        if (key === "notification_pro_radius_km") return Promise.resolve(30);
+        if (key === "notification_pro_result_limit") return Promise.resolve(15);
+        return Promise.resolve(fallback);
+      });
+      usersService.findNearbyProUsers.mockResolvedValue([]);
+
+      await service.notifyNearbyProUsers({
+        latitude: 6.5,
+        longitude: 3.4,
+        title: "New errand nearby!",
+        body: "Buy groceries",
+      });
+
+      expect(usersService.findNearbyProUsers).toHaveBeenCalledWith(
+        6.5,
+        3.4,
+        30,
+        15
+      );
     });
   });
 });

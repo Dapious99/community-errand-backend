@@ -6,22 +6,25 @@ import { Errand } from "./entities/errand.entity";
 import { Location } from "./entities/location.entity";
 import { MediaAttachment } from "./entities/media-attachment.entity";
 import { ErrandApplication } from "./entities/errand-application.entity";
+import { ErrandConcern } from "./entities/errand-concern.entity";
 import { PaymentsModule } from "../payments/payments.module";
 import { AiModule } from "../ai/ai.module";
 import { NotificationsModule } from "../notifications/notifications.module";
 import { WalletModule } from "../wallet/wallet.module";
 import { UsersModule } from "../users/users.module";
 import { ReferralsModule } from "../referrals/referrals.module";
+import { KycModule } from "../kyc/kyc.module";
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Errand, Location, MediaAttachment, ErrandApplication]),
+    TypeOrmModule.forFeature([Errand, Location, MediaAttachment, ErrandApplication, ErrandConcern]),
     PaymentsModule,
     AiModule,
     NotificationsModule,
     WalletModule,
     UsersModule,
     ReferralsModule,
+    KycModule,
   ],
   controllers: [ErrandsController],
   providers: [ErrandsService],

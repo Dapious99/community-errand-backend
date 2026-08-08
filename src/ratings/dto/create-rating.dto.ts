@@ -2,6 +2,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Min,
   Max,
   MinLength,
@@ -10,11 +11,11 @@ import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 
 export class CreateRatingDto {
   @ApiProperty({ example: "errand-uuid" })
-  @IsString()
+  @IsUUID()
   errandId: string;
 
   @ApiProperty({ example: "user-uuid" })
-  @IsString()
+  @IsUUID()
   toUserId: string;
 
   @ApiProperty({ example: 5, minimum: 1, maximum: 5 })

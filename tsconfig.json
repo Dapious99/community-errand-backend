@@ -9,6 +9,7 @@
     "esModuleInterop": true,
     "target": "ES2021",
     "sourceMap": true,
+    "isolatedModules": true,
     "outDir": "./dist",
     "skipLibCheck": true,
     "strictNullChecks": false,

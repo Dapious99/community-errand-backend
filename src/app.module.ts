@@ -22,6 +22,9 @@ import { WalletModule } from "./wallet/wallet.module";
 import { BillsModule } from "./bills/bills.module";
 import { SubscriptionsModule } from "./subscriptions/subscriptions.module";
 import { ReferralsModule } from "./referrals/referrals.module";
+import { ConcernsModule } from "./concerns/concerns.module";
+import { KycModule } from "./kyc/kyc.module";
+import { WhatsappModule } from "./whatsapp/whatsapp.module";
 
 @Module({
   imports: [
@@ -52,6 +55,9 @@ import { ReferralsModule } from "./referrals/referrals.module";
     BillsModule,
     SubscriptionsModule,
     ReferralsModule,
+    ConcernsModule,
+    KycModule,
+    WhatsappModule,
   ],
   controllers: [AppController],
   providers: [AppService],

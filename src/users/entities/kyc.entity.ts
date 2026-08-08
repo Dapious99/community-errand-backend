@@ -41,6 +41,14 @@ export class KYC {
   @Column({ nullable: true })
   bankName?: string;
 
+  // The name on the bank account itself, as registered with the bank - not
+  // necessarily the same as the user's platform display name. Used as the
+  // transfer recipient's registered name at withdrawal time (see
+  // PaymentsService.initiateWithdrawal), so a mismatch is caught by the
+  // bank rather than silently sending to the wrong name.
+  @Column({ nullable: true })
+  bankAccountName?: string;
+
   @Column({ nullable: true })
   paystackRecipientCode?: string;
 

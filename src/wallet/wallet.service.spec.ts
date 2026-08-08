@@ -9,13 +9,13 @@ import {
   WalletTransactionStatus,
   WalletTransactionType,
 } from "./entities/wallet-transaction.entity";
-import { SettingsService } from "../settings/settings.service";
+import { CountryConfigService } from "../settings/country-config.service";
 
 describe("WalletService", () => {
   let service: WalletService;
   let walletsRepo: any;
   let walletTransactionsRepo: any;
-  let settingsService: jest.Mocked<SettingsService>;
+  let countryConfigService: jest.Mocked<CountryConfigService>;
   let queryBuilder: any;
   let manager: any;
 
@@ -62,8 +62,13 @@ describe("WalletService", () => {
           },
         },
         {
-          provide: SettingsService,
-          useValue: { get: jest.fn() },
+          provide: CountryConfigService,
+          useValue: {
+            get: jest.fn().mockResolvedValue({
+              minWithdrawalAmount: 2000,
+              withdrawalFeePercent: 3.5,
+            }),
+          },
         },
         {
           provide: DataSource,
@@ -77,7 +82,7 @@ describe("WalletService", () => {
     service = module.get(WalletService);
     walletsRepo = module.get(getRepositoryToken(Wallet));
     walletTransactionsRepo = module.get(getRepositoryToken(WalletTransaction));
-    settingsService = module.get(SettingsService);
+    countryConfigService = module.get(CountryConfigService);
   });
 
   describe("getOrCreateWallet / getBalance", () => {
@@ -104,27 +109,17 @@ describe("WalletService", () => {
   });
 
   describe("getMinWithdrawalThreshold / getWithdrawalFeePercent", () => {
-    it("reads the configurable minimum withdrawal amount with a ₦2000 default", async () => {
-      settingsService.get.mockResolvedValue(2000);
+    it("reads the caller's country-configured minimum withdrawal amount", async () => {
+      const threshold = await service.getMinWithdrawalThreshold("Nigeria");
 
-      const threshold = await service.getMinWithdrawalThreshold();
-
-      expect(settingsService.get).toHaveBeenCalledWith(
-        "min_withdrawal_amount_ngn",
-        2000
-      );
+      expect(countryConfigService.get).toHaveBeenCalledWith("Nigeria");
       expect(threshold).toBe(2000);
     });
 
-    it("reads the configurable withdrawal fee percent with a 3.5% default", async () => {
-      settingsService.get.mockResolvedValue(3.5);
+    it("reads the caller's country-configured withdrawal fee percent", async () => {
+      const feePercent = await service.getWithdrawalFeePercent("Nigeria");
 
-      const feePercent = await service.getWithdrawalFeePercent();
-
-      expect(settingsService.get).toHaveBeenCalledWith(
-        "withdrawal_fee_percent",
-        3.5
-      );
+      expect(countryConfigService.get).toHaveBeenCalledWith("Nigeria");
       expect(feePercent).toBe(3.5);
     });
   });
@@ -314,6 +309,25 @@ describe("WalletService", () => {
       );
       expect(transaction.status).toBe(WalletTransactionStatus.PENDING);
     });
+
+    it("records a bonus-inclusive BUSINESS_CREDIT_PURCHASE amount when given that type", async () => {
+      walletsRepo.findOne.mockResolvedValue({ id: "wallet-1", balance: 1000 });
+
+      await service.createPendingDeposit(
+        "user-1",
+        22000,
+        "business-credit-ref",
+        WalletTransactionType.BUSINESS_CREDIT_PURCHASE
+      );
+
+      expect(walletTransactionsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: WalletTransactionType.BUSINESS_CREDIT_PURCHASE,
+          amount: 22000,
+          reference: "business-credit-ref",
+        })
+      );
+    });
   });
 
   describe("confirmDeposit", () => {
@@ -343,6 +357,20 @@ describe("WalletService", () => {
       expect(walletTransactionsRepo.create).not.toHaveBeenCalled();
       expect(result.status).toBe(WalletTransactionStatus.SUCCESS);
       expect(result.balanceAfter).toBe(1500);
+    });
+
+    it("resolves a business-credit purchase reference the same way as a plain deposit", async () => {
+      walletTransactionsRepo.findOne.mockResolvedValue({
+        id: "tx-1",
+        walletId: "wallet-1",
+        amount: 22000,
+        status: WalletTransactionStatus.PENDING,
+        type: WalletTransactionType.BUSINESS_CREDIT_PURCHASE,
+      });
+
+      const result = await service.confirmDeposit("business-credit-ref");
+
+      expect(result.status).toBe(WalletTransactionStatus.SUCCESS);
     });
   });
 });

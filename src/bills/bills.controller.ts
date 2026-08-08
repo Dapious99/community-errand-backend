@@ -12,7 +12,7 @@ import { JwtAuthGuard } from "../auth/guards/jwt-auth.guard";
 import { BillsService } from "./bills.service";
 import { PurchaseAirtimeDto } from "./dto/purchase-airtime.dto";
 import { PurchaseDataDto } from "./dto/purchase-data.dto";
-import { NetworkProvider } from "./enums/network-provider.enum";
+import { ListDataPlansDto } from "./dto/list-data-plans.dto";
 
 @ApiTags("bills")
 @Controller("bills")
@@ -47,7 +47,7 @@ export class BillsController {
   @ApiOperation({
     summary: "List available data plan variations for a network",
   })
-  async listDataPlans(@Query("network") network: NetworkProvider) {
+  async listDataPlans(@Query() { network }: ListDataPlansDto) {
     return this.billsService.listDataPlans(network);
   }
 

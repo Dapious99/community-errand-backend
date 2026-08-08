@@ -4,6 +4,7 @@ import { In, Repository } from "typeorm";
 import axios from "axios";
 import { PushToken } from "./entities/push-token.entity";
 import { UsersService } from "../users/users.service";
+import { SettingsService } from "../settings/settings.service";
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 const EXPO_TOKEN_PATTERN = /^ExponentPushToken\[.*\]$/;
@@ -24,7 +25,8 @@ export class NotificationsService {
   constructor(
     @InjectRepository(PushToken)
     private pushTokensRepository: Repository<PushToken>,
-    private usersService: UsersService
+    private usersService: UsersService,
+    private settingsService: SettingsService
   ) {}
 
   async registerToken(
@@ -98,11 +100,15 @@ export class NotificationsService {
     body: string;
     data?: Record<string, any>;
   }): Promise<void> {
+    const [defaultRadiusKm, defaultLimit] = await Promise.all([
+      this.settingsService.get("notification_runner_radius_km", 10),
+      this.settingsService.get("notification_runner_result_limit", 20),
+    ]);
     const runners = await this.usersService.findNearbyTopRatedRunners(
       params.latitude,
       params.longitude,
-      params.radiusKm ?? 10,
-      params.limit ?? 20
+      params.radiusKm ?? defaultRadiusKm,
+      params.limit ?? defaultLimit
     );
 
     if (runners.length === 0) return;
@@ -125,11 +131,15 @@ export class NotificationsService {
     body: string;
     data?: Record<string, any>;
   }): Promise<void> {
+    const [defaultRadiusKm, defaultLimit] = await Promise.all([
+      this.settingsService.get("notification_pro_radius_km", 10),
+      this.settingsService.get("notification_pro_result_limit", 50),
+    ]);
     const proUsers = await this.usersService.findNearbyProUsers(
       params.latitude,
       params.longitude,
-      params.radiusKm ?? 10,
-      params.limit ?? 50
+      params.radiusKm ?? defaultRadiusKm,
+      params.limit ?? defaultLimit
     );
 
     if (proUsers.length === 0) return;

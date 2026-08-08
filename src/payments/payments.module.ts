@@ -3,6 +3,7 @@ import { TypeOrmModule } from "@nestjs/typeorm";
 import { PaymentsService } from "./payments.service";
 import { PaymentsController } from "./payments.controller";
 import { PaystackService } from "./services/paystack.service";
+import { PaymentGatewayRegistry } from "./payment-gateway.registry";
 import { Payment } from "./entities/payment.entity";
 import { Errand } from "../errands/entities/errand.entity";
 import { User } from "../users/entities/user.entity";
@@ -15,7 +16,7 @@ import { WalletModule } from "../wallet/wallet.module";
     WalletModule,
   ],
   controllers: [PaymentsController],
-  providers: [PaymentsService, PaystackService],
+  providers: [PaymentsService, PaystackService, PaymentGatewayRegistry],
   exports: [PaymentsService],
 })
 export class PaymentsModule {}

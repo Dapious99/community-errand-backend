@@ -11,6 +11,7 @@ import { OtpService } from "../otp/otp.service";
 import { OtpPurpose } from "../otp/otp-purpose.enum";
 import { TrustedDevice } from "./entities/trusted-device.entity";
 import { ReferralsService } from "../referrals/referrals.service";
+import { CountryConfigService } from "../settings/country-config.service";
 
 describe("AuthService", () => {
   let authService: AuthService;
@@ -29,6 +30,7 @@ describe("AuthService", () => {
     ratingAvg: 0,
     avatarUrl: null,
     passwordHash: "",
+    country: "Nigeria",
   };
 
   beforeEach(async () => {
@@ -80,6 +82,19 @@ describe("AuthService", () => {
             createPending: jest.fn().mockResolvedValue(undefined),
           },
         },
+        {
+          provide: CountryConfigService,
+          useValue: {
+            get: jest.fn().mockResolvedValue({
+              country: "Nigeria",
+              currencyCode: "NGN",
+              currencySymbol: "₦",
+              boostPrice: 2500,
+              platformFeePercent: 10,
+              paymentGatewayProvider: "paystack",
+            }),
+          },
+        },
       ],
     }).compile();
 
@@ -107,6 +122,7 @@ describe("AuthService", () => {
         name: mockUser.name,
         role: mockUser.role,
         verified: mockUser.verified,
+        country: mockUser.country,
       });
       expect(result.accessToken).toBe("signed-token");
       expect(otpService.request).toHaveBeenCalled();

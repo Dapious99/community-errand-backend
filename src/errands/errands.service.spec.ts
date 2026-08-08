@@ -13,6 +13,7 @@ import {
   ErrandApplication,
   ErrandApplicationStatus,
 } from "./entities/errand-application.entity";
+import { ErrandConcern } from "./entities/errand-concern.entity";
 import { UserRole } from "../users/entities/user.entity";
 import { PaymentsService } from "../payments/payments.service";
 import { SettingsService } from "../settings/settings.service";
@@ -22,6 +23,9 @@ import { WalletService } from "../wallet/wallet.service";
 import { WalletTransactionType } from "../wallet/entities/wallet-transaction.entity";
 import { UsersService } from "../users/users.service";
 import { ReferralsService } from "../referrals/referrals.service";
+import { KycService } from "../kyc/kyc.service";
+import { KYCStatus } from "../users/entities/kyc.entity";
+import { CountryConfigService } from "../settings/country-config.service";
 
 describe("ErrandsService", () => {
   let service: ErrandsService;
@@ -33,6 +37,7 @@ describe("ErrandsService", () => {
   let walletService: jest.Mocked<WalletService>;
   let usersService: jest.Mocked<UsersService>;
   let referralsService: jest.Mocked<ReferralsService>;
+  let kycService: jest.Mocked<KycService>;
   let updateExecute: jest.Mock;
   let queryBuilder: any;
   let applicationsRepo: any;
@@ -88,11 +93,16 @@ describe("ErrandsService", () => {
           },
         },
         {
+          provide: getRepositoryToken(ErrandConcern),
+          useValue: {
+            find: jest.fn().mockResolvedValue([]),
+          },
+        },
+        {
           provide: PaymentsService,
           useValue: {
             processPayout: jest.fn().mockResolvedValue(null),
             processRefund: jest.fn().mockResolvedValue(null),
-            initializeBoostPayment: jest.fn(),
           },
         },
         {
@@ -123,16 +133,45 @@ describe("ErrandsService", () => {
         {
           provide: UsersService,
           useValue: {
-            findOne: jest
-              .fn()
-              .mockResolvedValue({ id: "user-1", proExpiresAt: null }),
+            findOne: jest.fn().mockResolvedValue({
+              id: "user-1",
+              proExpiresAt: null,
+              phone: "+2348012345678",
+            }),
             toPublicProfile: jest.fn((u) => ({ id: u?.id, name: u?.name })),
+            resetErrandFailures: jest.fn().mockResolvedValue(undefined),
+            recordPostingFailure: jest.fn().mockResolvedValue(undefined),
+            resetPostingFailures: jest.fn().mockResolvedValue(undefined),
           },
         },
         {
           provide: ReferralsService,
           useValue: {
             completeIfPending: jest.fn().mockResolvedValue(undefined),
+          },
+        },
+        {
+          provide: KycService,
+          useValue: {
+            getKyc: jest.fn().mockResolvedValue({ status: KYCStatus.APPROVED }),
+          },
+        },
+        {
+          provide: CountryConfigService,
+          useValue: {
+            get: jest.fn().mockResolvedValue({
+              country: "Nigeria",
+              currencyCode: "NGN",
+              currencySymbol: "₦",
+              boostPrice: 2500,
+              platformFeePercent: 10,
+              priorityPriceThreshold: 20000,
+              lightKycPriceThreshold: 5000,
+              proPlatformFeePercent: 5,
+              surgeThresholdOpenErrands: 50,
+              surgeMultiplier: 1.5,
+              paymentGatewayProvider: "paystack",
+            }),
           },
         },
       ],
@@ -148,6 +187,7 @@ describe("ErrandsService", () => {
     walletService = module.get(WalletService);
     usersService = module.get(UsersService);
     referralsService = module.get(ReferralsService);
+    kycService = module.get(KycService);
   });
 
   describe("create", () => {
@@ -180,6 +220,20 @@ describe("ErrandsService", () => {
       );
     });
 
+    it("escrows the tip alongside the price in the same debit", async () => {
+      const dtoWithTip = { ...dto, tip: 200 };
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dtoWithTip });
+
+      await service.create(dtoWithTip, "requester-1", "requester@example.com");
+
+      expect(walletService.debit).toHaveBeenCalledWith(
+        "requester-1",
+        1200,
+        WalletTransactionType.ERRAND_PAYMENT,
+        expect.any(Object)
+      );
+    });
+
     it("throws and creates nothing when the wallet balance is insufficient", async () => {
       walletService.debit.mockRejectedValue(
         new BadRequestException("Insufficient wallet balance")
@@ -203,7 +257,7 @@ describe("ErrandsService", () => {
       );
     });
 
-    it("creates a non-boosted errand without touching payments or AI", async () => {
+    it("creates a non-boosted errand without touching the wallet a second time or AI", async () => {
       errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
 
       const result = await service.create(
@@ -212,17 +266,22 @@ describe("ErrandsService", () => {
         "requester@example.com"
       );
 
-      expect(result.boostPayment).toBeUndefined();
-      expect(paymentsService.initializeBoostPayment).not.toHaveBeenCalled();
+      expect(result.boostFailed).toBeUndefined();
+      expect(walletService.debit).toHaveBeenCalledTimes(1);
+      expect(aiService.rewriteBoostTitle).not.toHaveBeenCalled();
     });
 
-    it("initializes a boost payment using the configurable price when isBoosted is set", async () => {
-      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
-      paymentsService.initializeBoostPayment.mockResolvedValue({
-        paymentId: "payment-1",
-        authorizationUrl: "https://paystack.test/pay",
-        reference: "boost-errand-1-123",
+    it("debits the wallet for the configurable boost price and activates the boost when isBoosted is set", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        ...dto,
+        locations: [
+          { type: LocationType.PICKUP, latitude: 6.5, longitude: 3.4 },
+        ],
       });
+      aiService.rewriteBoostTitle.mockResolvedValue(
+        "URGENT: Buy groceries now!"
+      );
 
       const result = await service.create(
         { ...dto, isBoosted: true },
@@ -230,26 +289,31 @@ describe("ErrandsService", () => {
         "requester@example.com"
       );
 
-      expect(settingsService.get).toHaveBeenCalledWith(
-        "ai_boost_price_ngn",
-        2500
+      expect(walletService.debit).toHaveBeenCalledWith(
+        "requester-1",
+        2500,
+        WalletTransactionType.BOOST,
+        expect.objectContaining({ errandId: "errand-1" })
       );
-      expect(paymentsService.initializeBoostPayment).toHaveBeenCalledWith(
+      expect(errandsRepo.update).toHaveBeenCalledWith(
         "errand-1",
-        "requester-1",
-        "requester@example.com",
-        2500
+        expect.objectContaining({ isBoosted: true })
       );
-      expect(result.boostPayment).toEqual({
-        authorizationUrl: "https://paystack.test/pay",
-        reference: "boost-errand-1-123",
-      });
+      expect(result.isBoosted).toBe(true);
+      expect(result.boostFailed).toBeUndefined();
+      expect(
+        notificationsService.notifyNearbyTopRatedRunners
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({ latitude: 6.5, longitude: 3.4 })
+      );
     });
 
-    it("still returns the errand if boost payment initialization fails", async () => {
+    it("still creates the errand (without the boost) when the wallet balance can't cover the boost fee", async () => {
       errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
-      paymentsService.initializeBoostPayment.mockRejectedValue(
-        new Error("paystack down")
+      walletService.debit.mockImplementation((_userId, _amount, type) =>
+        type === WalletTransactionType.BOOST
+          ? Promise.reject(new BadRequestException("Insufficient wallet balance"))
+          : Promise.resolve({ id: "payment-tx-1" } as any)
       );
 
       const result = await service.create(
@@ -258,7 +322,12 @@ describe("ErrandsService", () => {
         "requester@example.com"
       );
 
-      expect(result.boostPayment).toBeUndefined();
+      expect(result.boostFailed).toBe(true);
+      expect(result.boostFailureReason).toBe("insufficient_balance");
+      expect(errandsRepo.update).not.toHaveBeenCalledWith(
+        "errand-1",
+        expect.objectContaining({ isBoosted: true })
+      );
     });
 
     it("sets a priority window when the price is above the configurable threshold", async () => {
@@ -325,71 +394,81 @@ describe("ErrandsService", () => {
 
       expect(notificationsService.notifyNearbyProUsers).not.toHaveBeenCalled();
     });
+
+    it("sets a priority window for a boosted errand regardless of price", async () => {
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(
+        { ...dto, isBoosted: true },
+        "requester-1",
+        "requester@example.com"
+      );
+
+      expect(errandsRepo.create).toHaveBeenCalledWith(
+        expect.objectContaining({ priorityUntil: expect.any(Date) })
+      );
+    });
+
+    it("blocks a permanently posting-banned requester from creating an errand", async () => {
+      usersService.findOne.mockResolvedValue({
+        id: "requester-1",
+        permanentlyBannedFromPosting: true,
+      } as any);
+
+      await expect(
+        service.create(dto, "requester-1", "requester@example.com")
+      ).rejects.toThrow(ForbiddenException);
+      expect(walletService.debit).not.toHaveBeenCalled();
+    });
+
+    it("blocks a temporarily posting-banned requester from creating an errand", async () => {
+      usersService.findOne.mockResolvedValue({
+        id: "requester-1",
+        requesterBannedUntil: new Date(Date.now() + 60_000),
+      } as any);
+
+      await expect(
+        service.create(dto, "requester-1", "requester@example.com")
+      ).rejects.toThrow(ForbiddenException);
+      expect(walletService.debit).not.toHaveBeenCalled();
+    });
+
+    it("allows creation once a temporary posting ban has expired", async () => {
+      usersService.findOne.mockResolvedValue({
+        id: "requester-1",
+        requesterBannedUntil: new Date(Date.now() - 60_000),
+      } as any);
+      errandsRepo.findOne.mockResolvedValue({ id: "errand-1", ...dto });
+
+      await service.create(dto, "requester-1", "requester@example.com");
+
+      expect(walletService.debit).toHaveBeenCalled();
+    });
   });
 
-  describe("handleBoostPaymentSucceeded", () => {
-    it("flips isBoosted, rewrites the title, and notifies nearby top-rated runners", async () => {
-      errandsRepo.findOne.mockResolvedValue({
-        id: "errand-1",
-        title: "Buy groceries",
-        description: "Get milk and eggs",
-        locations: [
-          { type: LocationType.PICKUP, latitude: 6.5, longitude: 3.4 },
-        ],
-      });
-      aiService.rewriteBoostTitle.mockResolvedValue(
-        "URGENT: Buy groceries now!"
-      );
+  describe("getBoostPriceQuote", () => {
+    it("returns the flat boost price when the open-errand count is below the surge threshold", async () => {
+      errandsRepo.count.mockResolvedValue(10);
 
-      await service.handleBoostPaymentSucceeded({ errandId: "errand-1" });
+      const result = await service.getBoostPriceQuote("requester-1");
 
-      expect(errandsRepo.update).toHaveBeenCalledWith(
-        "errand-1",
-        expect.objectContaining({ isBoosted: true })
-      );
-      expect(errandsRepo.update).toHaveBeenCalledWith("errand-1", {
-        title: "URGENT: Buy groceries now!",
+      expect(result).toEqual({
+        price: 2500,
+        isSurge: false,
+        currencySymbol: "₦",
       });
-      expect(
-        notificationsService.notifyNearbyTopRatedRunners
-      ).toHaveBeenCalledWith(
-        expect.objectContaining({ latitude: 6.5, longitude: 3.4 })
-      );
     });
 
-    it("still flips isBoosted even if the AI title rewrite fails", async () => {
-      errandsRepo.findOne.mockResolvedValue({
-        id: "errand-1",
-        title: "Buy groceries",
-        description: "Get milk and eggs",
-        locations: [],
+    it("multiplies the boost price by the surge multiplier once the open-errand count hits the threshold", async () => {
+      errandsRepo.count.mockResolvedValue(50);
+
+      const result = await service.getBoostPriceQuote("requester-1");
+
+      expect(result).toEqual({
+        price: 3750,
+        isSurge: true,
+        currencySymbol: "₦",
       });
-      aiService.rewriteBoostTitle.mockRejectedValue(
-        new Error("AI unavailable")
-      );
-
-      await service.handleBoostPaymentSucceeded({ errandId: "errand-1" });
-
-      expect(errandsRepo.update).toHaveBeenCalledWith(
-        "errand-1",
-        expect.objectContaining({ isBoosted: true })
-      );
-    });
-
-    it("skips notification when the errand has no pickup coordinates", async () => {
-      errandsRepo.findOne.mockResolvedValue({
-        id: "errand-1",
-        title: "Buy groceries",
-        description: "Get milk and eggs",
-        locations: [],
-      });
-      aiService.rewriteBoostTitle.mockResolvedValue("Buy groceries");
-
-      await service.handleBoostPaymentSucceeded({ errandId: "errand-1" });
-
-      expect(
-        notificationsService.notifyNearbyTopRatedRunners
-      ).not.toHaveBeenCalled();
     });
   });
 
@@ -480,6 +559,7 @@ describe("ErrandsService", () => {
       usersService.findOne.mockResolvedValue({
         id: "runner-1",
         proExpiresAt: new Date(Date.now() + 60_000),
+        phone: "+2348012345678",
       } as any);
 
       const result = await service.acceptErrand(
@@ -510,7 +590,99 @@ describe("ErrandsService", () => {
       );
 
       expect(result.status).toBe(ErrandStatus.ACCEPTED);
-      expect(usersService.findOne).not.toHaveBeenCalled();
+    });
+
+    it("rejects a runner with an active pick-up ban", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        runnerBannedUntil: new Date(Date.now() + 60_000),
+      } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner with no phone number on file", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: undefined,
+      } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner with PENDING KYC from an errand at/above the light-KYC price threshold", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 999_999 });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("allows a runner with PENDING KYC to accept an errand below the light-KYC price threshold", async () => {
+      errandsRepo.findOne
+        .mockResolvedValueOnce({ ...openErrand, price: 1000 })
+        .mockResolvedValueOnce({
+          ...openErrand,
+          price: 1000,
+          status: ErrandStatus.ACCEPTED,
+          runnerId: "runner-1",
+        });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+
+      const result = await service.acceptErrand(
+        "errand-1",
+        "runner-1",
+        UserRole.RUNNER
+      );
+
+      expect(result.status).toBe(ErrandStatus.ACCEPTED);
+    });
+
+    it("rejects a runner with REJECTED KYC even for a low-price errand", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 1000 });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.REJECTED } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner with no KYC submission at all", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockRejectedValue(new Error("not found"));
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it("rejects requesters trying to accept their own errand", async () => {
@@ -558,6 +730,25 @@ describe("ErrandsService", () => {
 
       expect(result.status).toBe(ErrandStatus.ACCEPTED);
       expect(result.runnerId).toBe("runner-1");
+    });
+
+    it("honors an admin-configured errand_accept_eta_minutes override", async () => {
+      errandsRepo.findOne
+        .mockResolvedValueOnce({ ...openErrand })
+        .mockResolvedValueOnce({
+          ...openErrand,
+          status: ErrandStatus.ACCEPTED,
+          runnerId: "runner-1",
+        });
+      settingsService.get.mockImplementation((key: string, fallback: any) =>
+        key === "errand_accept_eta_minutes" ? 15 : fallback
+      );
+
+      await service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER);
+
+      expect(queryBuilder.set).toHaveBeenCalledWith(
+        expect.objectContaining({ etaMinutes: 15 })
+      );
     });
 
     it("throws ConflictException when another runner accepted it first", async () => {
@@ -640,6 +831,79 @@ describe("ErrandsService", () => {
       await service.applyToErrand("errand-1", "runner-2", UserRole.RUNNER);
 
       expect(errandsRepo.update).not.toHaveBeenCalled();
+    });
+
+    it("rejects a runner with an active pick-up ban", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        runnerBannedUntil: new Date(Date.now() + 60_000),
+      } as any);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner with no phone number on file", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: undefined,
+      } as any);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner whose identity KYC isn't APPROVED", async () => {
+      errandsRepo.findOne.mockResolvedValue(openErrand);
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.REJECTED } as any);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("rejects a runner with PENDING KYC applying to an errand at/above the light-KYC price threshold", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 999_999 });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
+    });
+
+    it("allows a runner with PENDING KYC to apply to an errand below the light-KYC price threshold", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 1000 });
+      applicationsRepo.findOne.mockResolvedValue(null);
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+
+      const result = await service.applyToErrand(
+        "errand-1",
+        "runner-1",
+        UserRole.RUNNER
+      );
+
+      expect(result.status).toBe(ErrandApplicationStatus.PENDING);
     });
   });
 
@@ -908,9 +1172,79 @@ describe("ErrandsService", () => {
       expect(referralsService.completeIfPending).not.toHaveBeenCalled();
     });
 
+    it("honors an admin-configured referral_qualifying_errand_count override", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      errandsRepo.count.mockResolvedValue(2); // 2nd completed errand
+      settingsService.get.mockImplementation((key: string, fallback: any) =>
+        key === "referral_qualifying_errand_count" ? 2 : fallback
+      );
+
+      await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(referralsService.completeIfPending).toHaveBeenCalledWith(
+        "requester-1"
+      );
+    });
+
     it("does not fail the request if the referral completion check throws", async () => {
       errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
       errandsRepo.count.mockRejectedValue(new Error("db down"));
+
+      const result = await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(result.status).toBe(ErrandStatus.COMPLETED);
+    });
+
+    it("resets the runner's consecutive-failure streak on completion", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+
+      await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(usersService.resetErrandFailures).toHaveBeenCalledWith("runner-1");
+    });
+
+    it("does not fail the request if resetting the failure streak throws", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      usersService.resetErrandFailures.mockRejectedValue(new Error("db down"));
+
+      const result = await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(result.status).toBe(ErrandStatus.COMPLETED);
+    });
+
+    it("resets the requester's posting-failure streak on completion", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+
+      await service.updateStatus(
+        "errand-1",
+        { status: ErrandStatus.COMPLETED },
+        "runner-1"
+      );
+
+      expect(usersService.resetPostingFailures).toHaveBeenCalledWith(
+        "requester-1"
+      );
+    });
+
+    it("does not fail the request if resetting the posting-failure streak throws", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...inProgressErrand });
+      usersService.resetPostingFailures.mockRejectedValue(new Error("db down"));
 
       const result = await service.updateStatus(
         "errand-1",
@@ -1019,6 +1353,35 @@ describe("ErrandsService", () => {
         expect.objectContaining({ status: ErrandStatus.CANCELLED })
       );
       expect(paymentsService.processRefund).toHaveBeenCalledWith("errand-1");
+    });
+
+    it("records a posting failure for the requester after cancelling", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        status: ErrandStatus.OPEN,
+        requesterId: "requester-1",
+      });
+
+      await service.cancel("errand-1", "requester-1");
+
+      expect(usersService.recordPostingFailure).toHaveBeenCalledWith(
+        "requester-1"
+      );
+    });
+
+    it("does not fail cancellation if recording the posting failure throws", async () => {
+      errandsRepo.findOne.mockResolvedValue({
+        id: "errand-1",
+        status: ErrandStatus.OPEN,
+        requesterId: "requester-1",
+      });
+      usersService.recordPostingFailure.mockRejectedValue(
+        new Error("db down")
+      );
+
+      await expect(
+        service.cancel("errand-1", "requester-1")
+      ).resolves.not.toThrow();
     });
   });
 });

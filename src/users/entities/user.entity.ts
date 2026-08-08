@@ -38,8 +38,25 @@ export class User {
   @Index()
   username?: string;
 
+  // WhatsApp channel identity - deliberately separate from `phone`, which has
+  // no verification flag and may not be the same number a user chats from
+  // (shared/family devices are common). Set once via the link-code flow in
+  // WhatsappIdentityService.
+  @Column({ unique: true, nullable: true })
+  @Index()
+  whatsappNumber?: string;
+
+  @Column({ type: "timestamp", nullable: true })
+  whatsappVerifiedAt?: Date;
+
   @Column()
   name: string;
+
+  // Drives which currency/payment gateway a user sees - collected at signup.
+  // Nullable because existing accounts predate this field (backfilled to
+  // "Nigeria" - the only market this platform has ever operated in so far).
+  @Column({ nullable: true })
+  country?: string;
 
   @Column()
   @Exclude()
@@ -57,6 +74,45 @@ export class User {
   // changes once this is set.
   @Column({ type: "timestamp", nullable: true })
   roleChangedAt?: Date;
+
+  // Consecutive errand-completion failures as a runner (unresolved concern
+  // timeout, self-release, or missed timed-errand deadline). Reset to 0 by
+  // any successful completion; hitting 3 triggers an escalating pick-up ban
+  // (72h, then 7 days, then permanent) and resets back to 0 - see
+  // UsersService.recordErrandFailure/resetErrandFailures.
+  @Column({ default: 0 })
+  consecutiveErrandFailures: number;
+
+  @Column({ type: "timestamp", nullable: true })
+  runnerBannedUntil?: Date;
+
+  // How many times a 3-strike ban has already been issued - determines the
+  // next ban's length (0 -> 72h, 1 -> 7 days, 2+ -> permanent).
+  @Column({ default: 0 })
+  banEscalationLevel: number;
+
+  // Set once escalation reaches its final tier. Unlike `runnerBannedUntil`,
+  // this never expires on its own - only an admin can clear it (see
+  // UsersService.liftPermanentBan).
+  @Column({ default: false })
+  permanentlyBannedFromPicking: boolean;
+
+  // Mirror of the four fields above, but for repeated errand cancellations
+  // as a requester (see ErrandsService.cancel/assertRequesterEligible) -
+  // same 3-strike, 72h/7-day/permanent escalation, just gating "post"
+  // instead of "pick". Reset to 0 by any of the requester's own posted
+  // errands completing successfully.
+  @Column({ default: 0 })
+  consecutivePostingFailures: number;
+
+  @Column({ type: "timestamp", nullable: true })
+  requesterBannedUntil?: Date;
+
+  @Column({ default: 0 })
+  postingBanEscalationLevel: number;
+
+  @Column({ default: false })
+  permanentlyBannedFromPosting: boolean;
 
   @Column({ default: false })
   verified: boolean;
@@ -135,6 +191,15 @@ export class User {
 
   @Column({ nullable: true })
   emergencyContactPhone?: string;
+
+  @Column({ default: true })
+  notifyNewErrandsNearby: boolean;
+
+  @Column({ default: true })
+  notifyBoostedErrandAlerts: boolean;
+
+  @Column({ default: true })
+  notifyNewMessages: boolean;
 
   @CreateDateColumn()
   createdAt: Date;

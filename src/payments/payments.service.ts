@@ -1,4 +1,5 @@
 import {
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -6,14 +7,23 @@ import {
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
 import { Repository, DataSource } from "typeorm";
-import { ConfigService } from "@nestjs/config";
 import { EventEmitter2 } from "@nestjs/event-emitter";
 import { Payment, PaymentType, PaymentStatus } from "./entities/payment.entity";
 import { Errand } from "../errands/entities/errand.entity";
 import { User } from "../users/entities/user.entity";
 import { KYC, KYCStatus } from "../users/entities/kyc.entity";
+import { isProUser } from "../users/utils/is-pro-user";
+import {
+  DEFAULT_BUSINESS_CREDIT_PACKAGES,
+  BusinessCreditPackage,
+  creditAmountFor,
+  findBusinessCreditPackage,
+} from "./business-credit-packages";
 import { PaystackService } from "./services/paystack.service";
+import { PaymentGatewayRegistry } from "./payment-gateway.registry";
 import { WalletService } from "../wallet/wallet.service";
+import { CountryConfigService } from "../settings/country-config.service";
+import { SettingsService } from "../settings/settings.service";
 import {
   WalletTransaction,
   WalletTransactionStatus,
@@ -34,15 +44,13 @@ export class PaymentsService {
     @InjectRepository(KYC)
     private kycRepository: Repository<KYC>,
     private paystackService: PaystackService,
-    private configService: ConfigService,
+    private paymentGatewayRegistry: PaymentGatewayRegistry,
     private eventEmitter: EventEmitter2,
     private dataSource: DataSource,
-    private walletService: WalletService
+    private walletService: WalletService,
+    private countryConfigService: CountryConfigService,
+    private settingsService: SettingsService
   ) {}
-
-  private getPlatformFeePercent(): number {
-    return this.configService.get<number>("PLATFORM_FEE_PERCENT", 10);
-  }
 
   /**
    * Tops up the caller's wallet via Paystack. Errand payments no longer go
@@ -58,7 +66,13 @@ export class PaymentsService {
   async initializeDeposit(userId: string, email: string, amount: number) {
     const reference = `deposit-${userId}-${Date.now()}`;
 
-    const paystackResponse = await this.paystackService.initializePayment(
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    const countryConfig = await this.countryConfigService.get(user?.country);
+    const gateway = this.paymentGatewayRegistry.resolve(
+      countryConfig.paymentGatewayProvider
+    );
+
+    const paystackResponse = await gateway.initializePayment(
       email,
       amount,
       reference,
@@ -77,69 +91,79 @@ export class PaymentsService {
     };
   }
 
+  async listBusinessCreditPackages(): Promise<BusinessCreditPackage[]> {
+    return this.settingsService.get(
+      "business_credit_packages",
+      DEFAULT_BUSINESS_CREDIT_PACKAGES
+    );
+  }
+
   /**
-   * Initializes a system-determined (not client-supplied) charge for the
-   * AI-Boost feature. Unlike escrow, the boost's actual effects (title
-   * rewrite, isBoosted flag, runner notifications) only activate once the
-   * webhook confirms this payment succeeded - see the `payment.boost.succeeded`
-   * event handler in ErrandsService - so a user can't get boosted-listing
-   * perks without actually completing the charge.
+   * Same pipeline as initializeDeposit/verifyPayment/handleWebhook, but the
+   * amount credited to the wallet on confirmation (creditAmount) is larger
+   * than what's actually charged via the gateway (pkg.payAmount) - the
+   * bonus is the whole point of buying in bulk. No new payment/posting logic
+   * needed: once credited, it's just wallet balance like any other top-up.
    */
-  async initializeBoostPayment(
-    errandId: string,
+  async purchaseBusinessCredits(
     userId: string,
     email: string,
-    amount: number
+    packageId: string
   ) {
-    const errand = await this.errandsRepository.findOne({
-      where: { id: errandId },
-    });
-    if (!errand) {
-      throw new NotFoundException("Errand not found");
+    const packages = await this.listBusinessCreditPackages();
+    const pkg = findBusinessCreditPackage(packages, packageId);
+    if (!pkg) {
+      throw new BadRequestException(`Unknown credit package "${packageId}"`);
     }
+    const creditAmount = creditAmountFor(pkg);
+    const reference = `business-credit-${userId}-${Date.now()}`;
 
-    const reference = `boost-${errandId}-${Date.now()}`;
-
-    const paystackResponse = await this.paystackService.initializePayment(
-      email,
-      amount,
-      reference,
-      { errandId, userId, purpose: "boost" }
+    const user = await this.usersRepository.findOne({ where: { id: userId } });
+    const countryConfig = await this.countryConfigService.get(user?.country);
+    const gateway = this.paymentGatewayRegistry.resolve(
+      countryConfig.paymentGatewayProvider
     );
 
-    const payment = this.paymentsRepository.create({
-      errandId,
-      userId,
-      amount,
-      type: PaymentType.BOOST,
-      status: PaymentStatus.PENDING,
-      paystackReference: paystackResponse.data.reference,
-      paystackAuthorizationUrl: paystackResponse.data.authorization_url,
-      description: `AI-Boost for errand: ${errand.title}`,
-    });
+    const gatewayResponse = await gateway.initializePayment(
+      email,
+      pkg.payAmount,
+      reference,
+      { userId, purpose: "business_credit_purchase", packageId, creditAmount }
+    );
 
-    await this.paymentsRepository.save(payment);
+    await this.walletService.createPendingDeposit(
+      userId,
+      creditAmount,
+      gatewayResponse.data.reference,
+      WalletTransactionType.BUSINESS_CREDIT_PURCHASE
+    );
 
     return {
-      paymentId: payment.id,
-      authorizationUrl: paystackResponse.data.authorization_url,
-      reference: paystackResponse.data.reference,
+      authorizationUrl: gatewayResponse.data.authorization_url,
+      reference: gatewayResponse.data.reference,
+      payAmount: pkg.payAmount,
+      creditAmount,
     };
   }
 
-  async verifyPayment(reference: string) {
+  async verifyPayment(reference: string, userId: string) {
     const verification = await this.paystackService.verifyPayment(reference);
 
     if (verification.data.status === "success") {
       const depositTransaction =
         await this.walletService.confirmDeposit(reference);
       if (depositTransaction) {
+        if (depositTransaction.userId !== userId) {
+          throw new ForbiddenException(
+            "This payment reference does not belong to you"
+          );
+        }
         return depositTransaction;
       }
     }
 
-    // Fall back to the Payment table - still used by BOOST, and by any
-    // historical ESCROW rows from before errand payments moved to the wallet.
+    // Fall back to the Payment table - still used by any historical
+    // ESCROW/BOOST rows from before those flows moved to the wallet.
     const payment = await this.paymentsRepository.findOne({
       where: { paystackReference: reference },
       relations: ["errand"],
@@ -147,6 +171,12 @@ export class PaymentsService {
 
     if (!payment) {
       throw new NotFoundException("Payment not found");
+    }
+
+    if (payment.userId !== userId) {
+      throw new ForbiddenException(
+        "This payment reference does not belong to you"
+      );
     }
 
     payment.status =
@@ -202,11 +232,15 @@ export class PaymentsService {
 
   /**
    * Triggered when an errand is marked COMPLETED. Deducts the platform fee
-   * from the escrowed amount and credits the remainder to the runner's
+   * from the escrowed price and credits the remainder to the runner's
    * wallet - it no longer wires money to a bank directly. Withdrawal to a
    * bank account is a separate, explicit action (see `initiateWithdrawal`),
    * so crediting the wallet needs no KYC/bank details and can't fail the way
-   * an external transfer can.
+   * an external transfer can. Any tip is added on top in full - the platform
+   * doesn't take a cut of tips, only of the errand price. A currently-Pro
+   * runner pays `CountryConfig.proPlatformFeePercent` instead of the
+   * standard `platformFeePercent` - a real perk on the supply side, not
+   * just requester-facing priority access.
    */
   async processPayout(errandId: string): Promise<WalletTransaction | null> {
     const existingPayout =
@@ -222,12 +256,21 @@ export class PaymentsService {
       return null;
     }
 
-    const feePercent = this.getPlatformFeePercent();
+    const runner = await this.usersRepository.findOne({
+      where: { id: errand.runnerId },
+    });
+    const countryConfig = await this.countryConfigService.get(
+      runner?.country
+    );
+    const feePercent = isProUser(runner ?? { proExpiresAt: undefined })
+      ? countryConfig.proPlatformFeePercent
+      : countryConfig.platformFeePercent;
     const platformFee = Number(
       ((Number(errand.price) * feePercent) / 100).toFixed(2)
     );
+    const tip = Number(errand.tip ?? 0);
     const payoutAmount = Number(
-      (Number(errand.price) - platformFee).toFixed(2)
+      (Number(errand.price) - platformFee + tip).toFixed(2)
     );
 
     return this.walletService.credit(
@@ -236,7 +279,7 @@ export class PaymentsService {
       WalletTransactionType.EARNING,
       {
         errandId,
-        description: `Earnings for errand "${errand.title}" (platform fee: ${platformFee})`,
+        description: `Earnings for errand "${errand.title}" (platform fee: ${platformFee}${tip ? `, tip: ${tip}` : ""})`,
       }
     );
   }
@@ -262,18 +305,28 @@ export class PaymentsService {
     feeAmount: number;
     status: WalletTransactionStatus;
   }> {
-    const balance = await this.walletService.getBalance(userId);
-    const threshold = await this.walletService.getMinWithdrawalThreshold();
-
-    if (balance < threshold) {
-      throw new BadRequestException(
-        `Wallet balance (₦${balance}) is below the minimum withdrawal amount (₦${threshold})`
-      );
-    }
-
     const runner = await this.usersRepository.findOne({
       where: { id: userId },
     });
+    const countryConfig = await this.countryConfigService.get(
+      runner?.country
+    );
+    const currencySymbol = countryConfig.currencySymbol;
+    const gateway = this.paymentGatewayRegistry.resolve(
+      countryConfig.paymentGatewayProvider
+    );
+
+    const balance = await this.walletService.getBalance(userId);
+    const threshold = await this.walletService.getMinWithdrawalThreshold(
+      runner?.country
+    );
+
+    if (balance < threshold) {
+      throw new BadRequestException(
+        `Wallet balance (${currencySymbol}${balance}) is below the minimum withdrawal amount (${currencySymbol}${threshold})`
+      );
+    }
+
     const kyc = await this.kycRepository.findOne({ where: { userId } });
 
     if (
@@ -281,14 +334,17 @@ export class PaymentsService {
       !kyc ||
       kyc.status !== KYCStatus.APPROVED ||
       !kyc.bankAccountNumber ||
-      !kyc.bankName
+      !kyc.bankName ||
+      !kyc.bankAccountName
     ) {
       throw new BadRequestException(
         "Approved KYC with bank details is required before you can withdraw"
       );
     }
 
-    const feePercent = await this.walletService.getWithdrawalFeePercent();
+    const feePercent = await this.walletService.getWithdrawalFeePercent(
+      runner.country
+    );
     const feeAmount = Number(((balance * feePercent) / 100).toFixed(2));
     const netAmount = Number((balance - feeAmount).toFixed(2));
 
@@ -305,16 +361,14 @@ export class PaymentsService {
     let recipientCode = kyc.paystackRecipientCode;
     try {
       if (!recipientCode) {
-        const bankCode = await this.paystackService.resolveBankCode(
-          kyc.bankName
-        );
+        const bankCode = await gateway.resolveBankCode(kyc.bankName);
         if (!bankCode) {
           throw new Error(
-            `Could not resolve Paystack bank code for "${kyc.bankName}"`
+            `Could not resolve a bank code for "${kyc.bankName}"`
           );
         }
-        recipientCode = await this.paystackService.createTransferRecipient(
-          runner.name,
+        recipientCode = await gateway.createTransferRecipient(
+          kyc.bankAccountName,
           kyc.bankAccountNumber,
           bankCode
         );
@@ -333,7 +387,7 @@ export class PaymentsService {
     }
 
     try {
-      const transfer = await this.paystackService.initiateTransfer(
+      const transfer = await gateway.initiateTransfer(
         recipientCode,
         netAmount,
         `Wallet withdrawal for ${runner.name}`,
@@ -397,5 +451,37 @@ export class PaymentsService {
       paymentTransaction.id,
       "Errand cancelled before pickup"
     );
+  }
+
+  /**
+   * Used when a runner forfeits a picked errand (missed timed-errand
+   * deadline, or an admin/system reopen after an unanswered concern that a
+   * caller decides should also refund rather than stay in escrow). Reverses
+   * both the ERRAND_PAYMENT (price + tip, escrowed as one lump sum at
+   * creation) and, if boosted, the separate BOOST transaction - the platform
+   * fee is never charged to the requester up front (it's only deducted from
+   * the runner's payout at completion), so there's nothing to hold back here.
+   */
+  async forfeitErrandFunds(errandId: string, reason: string): Promise<void> {
+    const paymentTransaction =
+      await this.walletService.findErrandPaymentByErrandId(errandId);
+    if (
+      paymentTransaction &&
+      paymentTransaction.status === WalletTransactionStatus.SUCCESS
+    ) {
+      await this.walletService.reverseTransaction(
+        paymentTransaction.id,
+        reason
+      );
+    }
+
+    const boostTransaction =
+      await this.walletService.findBoostByErrandId(errandId);
+    if (
+      boostTransaction &&
+      boostTransaction.status === WalletTransactionStatus.SUCCESS
+    ) {
+      await this.walletService.reverseTransaction(boostTransaction.id, reason);
+    }
   }
 }

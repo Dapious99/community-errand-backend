@@ -8,26 +8,23 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import * as bcrypt from "bcrypt";
 import { User, UserRole } from "./entities/user.entity";
-import { KYC, KYCStatus } from "./entities/kyc.entity";
 import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
-import { CreateKycDto } from "./dto/create-kyc.dto";
+import { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
 import { RatingsService } from "../ratings/ratings.service";
-import { OtpService } from "../otp/otp.service";
-import { OtpPurpose } from "../otp/otp-purpose.enum";
+import { SettingsService } from "../settings/settings.service";
 import { generateReferralCodeCandidate } from "./utils/referral-code";
-import { DojahService } from "./services/dojah.service";
+
+const DEFAULT_BAN_DURATION_LADDER_HOURS = [72, 168];
+const DEFAULT_BAN_STRIKE_THRESHOLD = 3;
 
 @Injectable()
 export class UsersService {
   constructor(
     @InjectRepository(User)
     private usersRepository: Repository<User>,
-    @InjectRepository(KYC)
-    private kycRepository: Repository<KYC>,
     private ratingsService: RatingsService,
-    private otpService: OtpService,
-    private dojahService: DojahService
+    private settingsService: SettingsService
   ) {}
 
   async create(createUserDto: CreateUserDto): Promise<User> {
@@ -89,6 +86,33 @@ export class UsersService {
 
   async findByEmail(email: string): Promise<User | null> {
     return this.usersRepository.findOne({ where: { email } });
+  }
+
+  async findByWhatsappNumber(whatsappNumber: string): Promise<User | null> {
+    return this.usersRepository.findOne({ where: { whatsappNumber } });
+  }
+
+  /**
+   * Links a WhatsApp number to `userId` once WhatsappLinkService has
+   * confirmed the in-app link code. Re-linking a different number moves the
+   * link (e.g. a new device) - the only rejection case is the number already
+   * belonging to a *different* account.
+   */
+  async linkWhatsapp(userId: string, whatsappNumber: string): Promise<User> {
+    const user = await this.findOne(userId);
+
+    const existing = await this.usersRepository.findOne({
+      where: { whatsappNumber },
+    });
+    if (existing && existing.id !== userId) {
+      throw new ConflictException(
+        "This WhatsApp number is already linked to a different account."
+      );
+    }
+
+    user.whatsappNumber = whatsappNumber;
+    user.whatsappVerifiedAt = new Date();
+    return this.usersRepository.save(user);
   }
 
   /**
@@ -166,109 +190,6 @@ export class UsersService {
     await this.usersRepository.update(id, { passwordHash });
   }
 
-  async submitKyc(
-    userId: string,
-    createKycDto: CreateKycDto
-  ): Promise<KYC | { requiresConfirmation: true; message: string }> {
-    const user = await this.findOne(userId);
-    const kyc = await this.kycRepository.findOne({ where: { userId } });
-
-    const isBankChange =
-      !!kyc &&
-      kyc.status === KYCStatus.APPROVED &&
-      ((createKycDto.bankAccountNumber !== undefined &&
-        createKycDto.bankAccountNumber !== kyc.bankAccountNumber) ||
-        (createKycDto.bankName !== undefined &&
-          createKycDto.bankName !== kyc.bankName));
-
-    if (isBankChange) {
-      await this.otpService.request(
-        OtpPurpose.BANK_CHANGE,
-        userId,
-        user.email,
-        {
-          pendingChanges: createKycDto,
-        }
-      );
-
-      return {
-        requiresConfirmation: true,
-        message:
-          "A confirmation code has been emailed to you to approve this bank detail change.",
-      };
-    }
-
-    // Only re-verify with Dojah when the nin/bvn value is actually new -
-    // re-submitting unrelated fields (e.g. re-uploading an ID photo)
-    // shouldn't refire a paid lookup for a value that was already checked.
-    const ninChanged = !kyc || kyc.nin !== createKycDto.nin;
-    const bvnChanged = !!createKycDto.bvn && (!kyc || kyc.bvn !== createKycDto.bvn);
-
-    const verification: Partial<KYC> = {};
-    if (ninChanged) {
-      const result = await this.dojahService.verifyNin(createKycDto.nin);
-      verification.ninVerificationData = result.data ?? { error: result.error };
-      if (result.verified) verification.ninVerifiedAt = new Date();
-    }
-    if (bvnChanged && createKycDto.bvn) {
-      const result = await this.dojahService.verifyBvn(createKycDto.bvn);
-      verification.bvnVerificationData = result.data ?? { error: result.error };
-      if (result.verified) verification.bvnVerifiedAt = new Date();
-    }
-
-    if (kyc) {
-      Object.assign(kyc, createKycDto, verification, {
-        // A non-bank edit to an already-approved KYC (e.g. re-uploading the ID
-        // card) doesn't need to go back through review.
-        status:
-          kyc.status === KYCStatus.APPROVED ? kyc.status : KYCStatus.PENDING,
-      });
-      return this.kycRepository.save(kyc);
-    }
-
-    const newKyc = this.kycRepository.create({
-      ...verification,
-      ...createKycDto,
-      userId,
-      status: KYCStatus.PENDING,
-    });
-    return this.kycRepository.save(newKyc);
-  }
-
-  /**
-   * Requires a pending bank-change OTP to actually exist - unlike
-   * `resendVerification`/`forgotPassword`, this is behind JWT auth already
-   * (no email-enumeration concern), so it's fine to surface a direct error
-   * rather than a generic response when there's nothing pending.
-   */
-  async resendBankChangeCode(userId: string): Promise<{ message: string }> {
-    const user = await this.findOne(userId);
-    await this.otpService.resend(OtpPurpose.BANK_CHANGE, userId, user.email);
-    return { message: "A new confirmation code has been emailed to you." };
-  }
-
-  async confirmBankChange(userId: string, code: string): Promise<KYC> {
-    const metadata = await this.otpService.verify(
-      OtpPurpose.BANK_CHANGE,
-      userId,
-      code
-    );
-    const kyc = await this.getKyc(userId);
-
-    Object.assign(kyc, metadata?.pendingChanges, { status: KYCStatus.PENDING });
-    return this.kycRepository.save(kyc);
-  }
-
-  async getKyc(userId: string): Promise<KYC> {
-    const kyc = await this.kycRepository.findOne({ where: { userId } });
-
-    if (!kyc) {
-      throw new NotFoundException("KYC submission not found");
-    }
-
-    return kyc;
-  }
-
   async getUserRatings(userId: string) {
     await this.findOne(userId);
 
@@ -306,27 +227,119 @@ export class UsersService {
     };
   }
 
-  async listKycByStatus(status?: KYCStatus): Promise<KYC[]> {
-    return this.kycRepository.find({
-      where: status ? { status } : {},
-      relations: ["user"],
-      order: { createdAt: "ASC" },
+  /**
+   * Escalating ban durations (hours) by escalation level - index 0 is the
+   * first ban a user ever gets. Once the level runs past this list, the ban
+   * is permanent instead of timed. Admin-tunable via
+   * `PATCH /admin/settings/ban_duration_ladder_hours` - see
+   * `src/settings/settings-catalog.ts`.
+   */
+  private async getBanDurationLadderMs(): Promise<number[]> {
+    const hours = await this.settingsService.get<number[]>(
+      "ban_duration_ladder_hours",
+      DEFAULT_BAN_DURATION_LADDER_HOURS
+    );
+    return hours.map((h) => h * 60 * 60 * 1000);
+  }
+
+  /** Consecutive failures before the next ban-ladder tier fires - admin-tunable via `ban_strike_threshold`. */
+  private async getBanStrikeThreshold(): Promise<number> {
+    return this.settingsService.get<number>(
+      "ban_strike_threshold",
+      DEFAULT_BAN_STRIKE_THRESHOLD
+    );
+  }
+
+  /**
+   * Called when a runner fails to deliver on a picked errand (unanswered
+   * concern, self-release, or a missed timed-errand deadline). Three
+   * consecutive failures triggers a pick-up ban that escalates each time it
+   * happens again: 72 hours, then 7 days, then permanent (requires an admin
+   * to lift - see liftPermanentBan). The consecutive-failure streak always
+   * resets to 0 once a ban is triggered.
+   */
+  async recordErrandFailure(userId: string): Promise<User> {
+    const user = await this.findOne(userId);
+    user.consecutiveErrandFailures += 1;
+
+    const strikeThreshold = await this.getBanStrikeThreshold();
+    if (user.consecutiveErrandFailures >= strikeThreshold) {
+      user.consecutiveErrandFailures = 0;
+
+      const banDurationsMs = await this.getBanDurationLadderMs();
+      const banDurationMs = banDurationsMs[user.banEscalationLevel];
+      if (banDurationMs === undefined) {
+        user.permanentlyBannedFromPicking = true;
+        user.runnerBannedUntil = undefined;
+      } else {
+        user.runnerBannedUntil = new Date(Date.now() + banDurationMs);
+        user.banEscalationLevel += 1;
+      }
+    }
+
+    return this.usersRepository.save(user);
+  }
+
+  /** Any successful completion clears the consecutive-failure streak. */
+  async resetErrandFailures(userId: string): Promise<void> {
+    await this.usersRepository.update(userId, {
+      consecutiveErrandFailures: 0,
     });
   }
 
-  async approveKyc(userId: string): Promise<KYC> {
-    const kyc = await this.getKyc(userId);
-    kyc.status = KYCStatus.APPROVED;
-    kyc.verifiedAt = new Date();
-    kyc.rejectionReason = undefined;
-    return this.kycRepository.save(kyc);
+  /**
+   * Admin-only escape hatch for a permanent ban - clears the ban itself but
+   * deliberately leaves `banEscalationLevel` where it was, so a future
+   * 3-strike violation goes straight back to permanent rather than starting
+   * the 72h/7-day escalation over.
+   */
+  async liftPermanentBan(userId: string): Promise<User> {
+    const user = await this.findOne(userId);
+    user.permanentlyBannedFromPicking = false;
+    user.runnerBannedUntil = undefined;
+    return this.usersRepository.save(user);
   }
 
-  async rejectKyc(userId: string, reason: string): Promise<KYC> {
-    const kyc = await this.getKyc(userId);
-    kyc.status = KYCStatus.REJECTED;
-    kyc.rejectionReason = reason;
-    return this.kycRepository.save(kyc);
+  /**
+   * Requester-side mirror of recordErrandFailure - called when a requester
+   * cancels a posted errand (see ErrandsService.cancel). Same 3-strike,
+   * 72h/7-day/permanent escalation, gating posting instead of picking.
+   */
+  async recordPostingFailure(userId: string): Promise<User> {
+    const user = await this.findOne(userId);
+    user.consecutivePostingFailures += 1;
+
+    const strikeThreshold = await this.getBanStrikeThreshold();
+    if (user.consecutivePostingFailures >= strikeThreshold) {
+      user.consecutivePostingFailures = 0;
+
+      const banDurationsMs = await this.getBanDurationLadderMs();
+      const banDurationMs = banDurationsMs[user.postingBanEscalationLevel];
+      if (banDurationMs === undefined) {
+        user.permanentlyBannedFromPosting = true;
+        user.requesterBannedUntil = undefined;
+      } else {
+        user.requesterBannedUntil = new Date(Date.now() + banDurationMs);
+        user.postingBanEscalationLevel += 1;
+      }
+    }
+
+    return this.usersRepository.save(user);
+  }
+
+  /** Any of the requester's own posted errands completing successfully clears the consecutive-cancellation streak. */
+  async resetPostingFailures(userId: string): Promise<void> {
+    await this.usersRepository.update(userId, {
+      consecutivePostingFailures: 0,
+    });
+  }
+
+  /** Admin-only escape hatch for a permanent posting ban - mirrors liftPermanentBan. */
+  async liftPermanentPostingBan(userId: string): Promise<User> {
+    const user = await this.findOne(userId);
+    user.permanentlyBannedFromPosting = false;
+    user.requesterBannedUntil = undefined;
+    return this.usersRepository.save(user);
   }
 
   async updateLocation(
@@ -339,6 +352,23 @@ export class UsersService {
       lastLongitude: longitude,
       lastLocationAt: new Date(),
     });
+  }
+
+  async getNotificationPreferences(userId: string) {
+    const user = await this.findOne(userId);
+    return {
+      notifyNewErrandsNearby: user.notifyNewErrandsNearby,
+      notifyBoostedErrandAlerts: user.notifyBoostedErrandAlerts,
+      notifyNewMessages: user.notifyNewMessages,
+    };
+  }
+
+  async updateNotificationPreferences(
+    userId: string,
+    dto: UpdateNotificationPreferencesDto
+  ) {
+    await this.usersRepository.update(userId, dto);
+    return this.getNotificationPreferences(userId);
   }
 
   /**
@@ -369,6 +399,7 @@ export class UsersService {
       .where("user.role IN (:...roles)", {
         roles: [UserRole.RUNNER, UserRole.BOTH],
       })
+      .andWhere('user."notifyBoostedErrandAlerts" = true')
       .andWhere(
         'user."lastLatitude" IS NOT NULL AND user."lastLongitude" IS NOT NULL'
       )
@@ -403,6 +434,7 @@ export class UsersService {
       .where("user.role IN (:...roles)", {
         roles: [UserRole.RUNNER, UserRole.BOTH],
       })
+      .andWhere('user."notifyNewErrandsNearby" = true')
       .andWhere(
         'user."lastLatitude" IS NOT NULL AND user."lastLongitude" IS NOT NULL'
       )

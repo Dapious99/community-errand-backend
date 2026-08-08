@@ -4,8 +4,8 @@ import {
   NotFoundException,
 } from "@nestjs/common";
 import { InjectRepository } from "@nestjs/typeorm";
-import { DataSource, EntityManager, Repository } from "typeorm";
-import { SettingsService } from "../settings/settings.service";
+import { DataSource, EntityManager, In, Repository } from "typeorm";
+import { CountryConfigService } from "../settings/country-config.service";
 import { Wallet } from "./entities/wallet.entity";
 import {
   WalletTransaction,
@@ -28,7 +28,7 @@ export class WalletService {
     private walletsRepository: Repository<Wallet>,
     @InjectRepository(WalletTransaction)
     private walletTransactionsRepository: Repository<WalletTransaction>,
-    private settingsService: SettingsService,
+    private countryConfigService: CountryConfigService,
     private dataSource: DataSource
   ) {}
 
@@ -62,12 +62,14 @@ export class WalletService {
     return wallet.balance;
   }
 
-  async getMinWithdrawalThreshold(): Promise<number> {
-    return this.settingsService.get<number>("min_withdrawal_amount_ngn", 2000);
+  async getMinWithdrawalThreshold(country?: string | null): Promise<number> {
+    const config = await this.countryConfigService.get(country);
+    return config.minWithdrawalAmount;
   }
 
-  async getWithdrawalFeePercent(): Promise<number> {
-    return this.settingsService.get<number>("withdrawal_fee_percent", 3.5);
+  async getWithdrawalFeePercent(country?: string | null): Promise<number> {
+    const config = await this.countryConfigService.get(country);
+    return config.withdrawalFeePercent;
   }
 
   async credit(
@@ -240,6 +242,14 @@ export class WalletService {
     });
   }
 
+  async findBoostByErrandId(
+    errandId: string
+  ): Promise<WalletTransaction | null> {
+    return this.walletTransactionsRepository.findOne({
+      where: { errandId, type: WalletTransactionType.BOOST },
+    });
+  }
+
   /**
    * The errand row doesn't exist yet when its payment is debited (the debit
    * happens first, so a failed debit creates nothing) - this attaches the
@@ -258,18 +268,22 @@ export class WalletService {
    * Records that a deposit was initiated, without touching the balance yet -
    * crediting has to wait for Paystack to actually confirm the charge
    * (`confirmDeposit`), otherwise a user could get free wallet balance
-   * without ever completing payment.
+   * without ever completing payment. `type` defaults to a plain top-up
+   * (DEPOSIT); business-credit purchases pass BUSINESS_CREDIT_PURCHASE and
+   * a bonus-inclusive `amount` that's larger than what was actually charged
+   * via the gateway - see PaymentsService.purchaseBusinessCredits.
    */
   async createPendingDeposit(
     userId: string,
     amount: number,
-    reference: string
+    reference: string,
+    type: WalletTransactionType = WalletTransactionType.DEPOSIT
   ): Promise<WalletTransaction> {
     const wallet = await this.getOrCreateWallet(userId);
     const transaction = this.walletTransactionsRepository.create({
       walletId: wallet.id,
       userId,
-      type: WalletTransactionType.DEPOSIT,
+      type,
       amount,
       status: WalletTransactionStatus.PENDING,
       balanceAfter: wallet.balance,
@@ -279,18 +293,21 @@ export class WalletService {
   }
 
   /**
-   * Resolves a pending deposit once Paystack confirms the charge - credits
-   * the wallet and updates the same ledger row to SUCCESS (rather than
-   * inserting a second row) to avoid double bookkeeping for one deposit.
-   * Returns null if there's no matching pending deposit (already resolved,
-   * or the reference isn't a deposit at all), so callers can fall through to
-   * other reference-matching logic.
+   * Resolves a pending deposit (plain top-up or business-credit purchase)
+   * once Paystack confirms the charge - credits the wallet and updates the
+   * same ledger row to SUCCESS (rather than inserting a second row) to
+   * avoid double bookkeeping. Returns null if there's no matching pending
+   * deposit (already resolved, or the reference isn't one of these types at
+   * all), so callers can fall through to other reference-matching logic.
    */
   async confirmDeposit(reference: string): Promise<WalletTransaction | null> {
     const pending = await this.walletTransactionsRepository.findOne({
       where: {
         reference,
-        type: WalletTransactionType.DEPOSIT,
+        type: In([
+          WalletTransactionType.DEPOSIT,
+          WalletTransactionType.BUSINESS_CREDIT_PURCHASE,
+        ]),
         status: WalletTransactionStatus.PENDING,
       },
     });

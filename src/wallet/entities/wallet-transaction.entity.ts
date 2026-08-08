@@ -20,6 +20,8 @@ export enum WalletTransactionType {
   ERRAND_PAYMENT = "errand_payment",
   SUBSCRIPTION = "subscription",
   REFERRAL_BONUS = "referral_bonus",
+  BOOST = "boost",
+  BUSINESS_CREDIT_PURCHASE = "business_credit_purchase",
 }
 
 export enum WalletTransactionStatus {
