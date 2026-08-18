@@ -31,13 +31,19 @@ export class UsersController {
   @Get("profile")
   @ApiOperation({ summary: "Get current user profile" })
   async getProfile(@Request() req) {
-    return this.usersService.findOne(req.user.id);
+    const user = await this.usersService.findOne(req.user.id);
+    return Object.assign(user, {
+      identityVerified: this.usersService.isIdentityVerified(user),
+    });
   }
 
   @Patch("profile")
   @ApiOperation({ summary: "Update user profile" })
   async updateProfile(@Request() req, @Body() updateUserDto: UpdateUserDto) {
-    return this.usersService.update(req.user.id, updateUserDto);
+    const user = await this.usersService.update(req.user.id, updateUserDto);
+    return Object.assign(user, {
+      identityVerified: this.usersService.isIdentityVerified(user),
+    });
   }
 
   @Get("stats")

@@ -205,7 +205,7 @@ export class BillsFlow {
       );
       return session;
     }
-    const data = { ...session.data, amount };
+    const data: Record<string, any> = { ...session.data, amount };
     await this.whatsappService.sendText(
       phone,
       `Buy ₦${amount} airtime on ${NETWORK_LABELS[data.network as NetworkProvider]} for ${data.billPhone}?`
@@ -338,7 +338,7 @@ export class BillsFlow {
       );
       return session;
     }
-    const data = { ...session.data, billPhone };
+    const data: Record<string, any> = { ...session.data, billPhone };
     await this.whatsappService.sendText(
       phone,
       `Buy "${data.planName}" (₦${data.planAmount}) on ${NETWORK_LABELS[data.network as NetworkProvider]} for ${billPhone}?`

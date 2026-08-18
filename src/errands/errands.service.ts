@@ -419,6 +419,84 @@ export class ErrandsService {
     return errands.map((errand) => this.scrubParticipants(errand));
   }
 
+  /**
+   * Admin-only: every errand platform-wide, deliberately NOT scoped to a
+   * requester/runner and NOT scrubbed (see scrubParticipants below) - admin
+   * moderation needs the requester/runner's real email/phone, and isn't
+   * subject to the Pro-priority-window or "hide my own open errand" rules
+   * that shape the regular browse feed in findAll().
+   */
+  async findAllForAdmin(
+    filterDto: FilterErrandsDto
+  ): Promise<{ data: Errand[]; total: number; page: number; limit: number }> {
+    const { page = 1, limit = 20, ...filters } = filterDto;
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.errandsRepository
+      .createQueryBuilder("errand")
+      .leftJoinAndSelect("errand.requester", "requester")
+      .leftJoinAndSelect("errand.runner", "runner")
+      .leftJoinAndSelect("errand.locations", "locations")
+      .leftJoinAndSelect("errand.mediaAttachments", "mediaAttachments");
+
+    if (filters.category) {
+      queryBuilder.andWhere("errand.category = :category", { category: filters.category });
+    }
+    if (filters.status) {
+      queryBuilder.andWhere("errand.status = :status", { status: filters.status });
+    }
+    if (filters.urgency) {
+      queryBuilder.andWhere("errand.urgency = :urgency", { urgency: filters.urgency });
+    }
+    if (filters.search) {
+      queryBuilder.andWhere(
+        "(errand.title ILIKE :search OR errand.description ILIKE :search)",
+        { search: `%${filters.search}%` }
+      );
+    }
+    if (filters.minPrice !== undefined) {
+      queryBuilder.andWhere("errand.price >= :minPrice", { minPrice: filters.minPrice });
+    }
+    if (filters.maxPrice !== undefined) {
+      queryBuilder.andWhere("errand.price <= :maxPrice", { maxPrice: filters.maxPrice });
+    }
+
+    switch (filters.sortBy) {
+      case "price_high":
+        queryBuilder.orderBy("errand.price", "DESC");
+        break;
+      case "price_low":
+        queryBuilder.orderBy("errand.price", "ASC");
+        break;
+      case "newest":
+      default:
+        queryBuilder.orderBy("errand.createdAt", "DESC");
+        break;
+    }
+
+    const [data, total] = await queryBuilder.skip(skip).take(limit).getManyAndCount();
+
+    await this.attachOpenConcernFlags(data);
+
+    return { data, total, page, limit };
+  }
+
+  /** Admin-only single-errand detail - same "no scrubbing" rationale as findAllForAdmin. */
+  async findOneForAdmin(id: string): Promise<Errand> {
+    const errand = await this.errandsRepository.findOne({
+      where: { id },
+      relations: ["requester", "runner", "locations", "mediaAttachments"],
+    });
+
+    if (!errand) {
+      throw new NotFoundException("Errand not found");
+    }
+
+    await this.attachOpenConcernFlags([errand]);
+
+    return errand;
+  }
+
   /** One indexed query for the whole batch rather than one per errand. */
   private async attachOpenConcernFlags(errands: Errand[]): Promise<void> {
     if (errands.length === 0) return;
@@ -514,13 +592,17 @@ export class ErrandsService {
     }
 
     const kyc = await this.kycService.getKyc(runner.id).catch(() => null);
-    if (!kyc || kyc.status === KYCStatus.REJECTED) {
+    if (kyc?.status === KYCStatus.APPROVED) {
+      return;
+    }
+    // A KYC row can exist with no NIN at all - KycService.submitBankDetails
+    // creates one purely from bank details, defaulted to PENDING. That's
+    // never sufficient on its own; only a submitted NIN counts as identity
+    // verification actually being underway.
+    if (!kyc || !kyc.nin || kyc.status === KYCStatus.REJECTED) {
       throw new ForbiddenException(
         "Verify your NIN before picking errands - submit it from the Identity Verification screen."
       );
-    }
-    if (kyc.status === KYCStatus.APPROVED) {
-      return;
     }
 
     // PENDING at this point - allowed only under the country's light-KYC threshold.

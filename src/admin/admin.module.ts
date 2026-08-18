@@ -10,12 +10,15 @@ import { AdminKycController } from "./admin-kyc.controller";
 import { AdminConcernsController } from "./admin-concerns.controller";
 import { AdminUsersController } from "./admin-users.controller";
 import { AdminCountryConfigsController } from "./admin-country-configs.controller";
+import { AdminErrandsController } from "./admin-errands.controller";
 import { AdminJwtStrategy } from "./strategies/admin-jwt.strategy";
 import { Admin } from "./entities/admin.entity";
 import { UsersModule } from "../users/users.module";
 import { OtpModule } from "../otp/otp.module";
 import { ConcernsModule } from "../concerns/concerns.module";
 import { KycModule } from "../kyc/kyc.module";
+import { ErrandsModule } from "../errands/errands.module";
+import { MessagesModule } from "../messages/messages.module";
 
 @Module({
   imports: [
@@ -24,6 +27,8 @@ import { KycModule } from "../kyc/kyc.module";
     OtpModule,
     ConcernsModule,
     KycModule,
+    ErrandsModule,
+    MessagesModule,
     PassportModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -43,6 +48,7 @@ import { KycModule } from "../kyc/kyc.module";
     AdminConcernsController,
     AdminUsersController,
     AdminCountryConfigsController,
+    AdminErrandsController,
   ],
   providers: [AdminAuthService, AdminJwtStrategy],
   exports: [AdminAuthService],

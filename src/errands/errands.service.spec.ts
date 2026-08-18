@@ -625,7 +625,10 @@ describe("ErrandsService", () => {
         proExpiresAt: null,
         phone: "+2348012345678",
       } as any);
-      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        nin: "12345678901",
+      } as any);
 
       await expect(
         service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
@@ -646,7 +649,10 @@ describe("ErrandsService", () => {
         proExpiresAt: null,
         phone: "+2348012345678",
       } as any);
-      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        nin: "12345678901",
+      } as any);
 
       const result = await service.acceptErrand(
         "errand-1",
@@ -655,6 +661,23 @@ describe("ErrandsService", () => {
       );
 
       expect(result.status).toBe(ErrandStatus.ACCEPTED);
+    });
+
+    it("rejects a runner with a KYC row that only has bank details on file (no NIN ever submitted), regardless of price", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 1000 });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        bankAccountNumber: "0123456789",
+      } as any);
+
+      await expect(
+        service.acceptErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
     });
 
     it("rejects a runner with REJECTED KYC even for a low-price errand", async () => {
@@ -880,7 +903,10 @@ describe("ErrandsService", () => {
         proExpiresAt: null,
         phone: "+2348012345678",
       } as any);
-      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        nin: "12345678901",
+      } as any);
 
       await expect(
         service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
@@ -895,7 +921,10 @@ describe("ErrandsService", () => {
         proExpiresAt: null,
         phone: "+2348012345678",
       } as any);
-      kycService.getKyc.mockResolvedValue({ status: KYCStatus.PENDING } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        nin: "12345678901",
+      } as any);
 
       const result = await service.applyToErrand(
         "errand-1",
@@ -904,6 +933,23 @@ describe("ErrandsService", () => {
       );
 
       expect(result.status).toBe(ErrandApplicationStatus.PENDING);
+    });
+
+    it("rejects a runner with a KYC row that only has bank details on file (no NIN ever submitted), regardless of price", async () => {
+      errandsRepo.findOne.mockResolvedValue({ ...openErrand, price: 1000 });
+      usersService.findOne.mockResolvedValue({
+        id: "runner-1",
+        proExpiresAt: null,
+        phone: "+2348012345678",
+      } as any);
+      kycService.getKyc.mockResolvedValue({
+        status: KYCStatus.PENDING,
+        bankAccountNumber: "0123456789",
+      } as any);
+
+      await expect(
+        service.applyToErrand("errand-1", "runner-1", UserRole.RUNNER)
+      ).rejects.toThrow(ForbiddenException);
     });
   });
 

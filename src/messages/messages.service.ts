@@ -107,6 +107,22 @@ export class MessagesService {
       .getMany();
   }
 
+  /** Admin-only: full message history for any errand, skipping the participant check - for moderation/support. */
+  async findByErrandForAdmin(errandId: string): Promise<Message[]> {
+    const errand = await this.errandsRepository.findOne({ where: { id: errandId } });
+    if (!errand) {
+      throw new NotFoundException("Errand not found");
+    }
+
+    return this.messagesRepository
+      .createQueryBuilder("message")
+      .leftJoin("message.fromUser", "fromUser")
+      .addSelect(["fromUser.id", "fromUser.name", "fromUser.avatarUrl"])
+      .where("message.errandId = :errandId", { errandId })
+      .orderBy("message.createdAt", "ASC")
+      .getMany();
+  }
+
   /** Feature D (AI Smart Replies): up to 3 quick-reply suggestions from recent context. */
   async getSmartReplies(errandId: string, userId: string): Promise<string[]> {
     await this.verifyParticipant(errandId, userId);

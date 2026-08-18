@@ -83,8 +83,11 @@ export class User {
   @Column({ default: 0 })
   consecutiveErrandFailures: number;
 
+  // Typed `| null` (not just optional) because clearing this column requires
+  // assigning `null` before `.save()` - TypeORM silently omits `undefined`
+  // properties from the generated UPDATE instead of nulling them out.
   @Column({ type: "timestamp", nullable: true })
-  runnerBannedUntil?: Date;
+  runnerBannedUntil?: Date | null;
 
   // How many times a 3-strike ban has already been issued - determines the
   // next ban's length (0 -> 72h, 1 -> 7 days, 2+ -> permanent).
@@ -106,7 +109,7 @@ export class User {
   consecutivePostingFailures: number;
 
   @Column({ type: "timestamp", nullable: true })
-  requesterBannedUntil?: Date;
+  requesterBannedUntil?: Date | null;
 
   @Column({ default: 0 })
   postingBanEscalationLevel: number;

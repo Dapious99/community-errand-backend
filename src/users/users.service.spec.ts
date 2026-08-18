@@ -3,6 +3,7 @@ import { getRepositoryToken } from "@nestjs/typeorm";
 import { ConflictException } from "@nestjs/common";
 import { UsersService } from "./users.service";
 import { User } from "./entities/user.entity";
+import { KYCStatus } from "./entities/kyc.entity";
 import { RatingsService } from "../ratings/ratings.service";
 import { SettingsService } from "../settings/settings.service";
 
@@ -347,6 +348,60 @@ describe("UsersService", () => {
       expect(result.permanentlyBannedFromPosting).toBe(false);
       expect(result.requesterBannedUntil).toBeUndefined();
       expect(result.postingBanEscalationLevel).toBe(2);
+    });
+  });
+
+  describe("isIdentityVerified", () => {
+    it("is false when no KYC has been submitted", () => {
+      expect(service.isIdentityVerified({ ...user, kyc: undefined } as any)).toBe(false);
+    });
+
+    it("is false when KYC is still pending or rejected", () => {
+      expect(
+        service.isIdentityVerified({
+          ...user,
+          kyc: { status: KYCStatus.PENDING },
+        } as any)
+      ).toBe(false);
+      expect(
+        service.isIdentityVerified({
+          ...user,
+          kyc: { status: KYCStatus.REJECTED },
+        } as any)
+      ).toBe(false);
+    });
+
+    it("is true only once KYC has been admin-approved", () => {
+      expect(
+        service.isIdentityVerified({
+          ...user,
+          kyc: { status: KYCStatus.APPROVED },
+        } as any)
+      ).toBe(true);
+    });
+  });
+
+  describe("toPublicProfile", () => {
+    it("includes identityVerified alongside the email-verification-based verified flag", () => {
+      const profile = service.toPublicProfile({
+        ...user,
+        verified: true,
+        kyc: { status: KYCStatus.APPROVED },
+      } as any);
+
+      expect(profile.verified).toBe(true);
+      expect(profile.identityVerified).toBe(true);
+    });
+
+    it("keeps identityVerified false when KYC isn't approved even if the email is verified", () => {
+      const profile = service.toPublicProfile({
+        ...user,
+        verified: true,
+        kyc: { status: KYCStatus.PENDING },
+      } as any);
+
+      expect(profile.verified).toBe(true);
+      expect(profile.identityVerified).toBe(false);
     });
   });
 });

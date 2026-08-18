@@ -8,9 +8,12 @@ import { InjectRepository } from "@nestjs/typeorm";
 import { Repository } from "typeorm";
 import * as bcrypt from "bcrypt";
 import { User, UserRole } from "./entities/user.entity";
+import { KYCStatus } from "./entities/kyc.entity";
 import { CreateUserDto } from "./dto/create-user.dto";
 import { UpdateUserDto } from "./dto/update-user.dto";
 import { UpdateNotificationPreferencesDto } from "./dto/update-notification-preferences.dto";
+import { ListUsersQueryDto } from "../admin/dto/list-users-query.dto";
+import { BanUserDto } from "../admin/dto/ban-user.dto";
 import { RatingsService } from "../ratings/ratings.service";
 import { SettingsService } from "../settings/settings.service";
 import { generateReferralCodeCandidate } from "./utils/referral-code";
@@ -88,6 +91,47 @@ export class UsersService {
     return this.usersRepository.findOne({ where: { email } });
   }
 
+  /** Admin-only: paginated, searchable, filterable user directory - no equivalent exists for regular users. */
+  async listUsers(
+    query: ListUsersQueryDto
+  ): Promise<{ data: User[]; total: number; page: number; limit: number }> {
+    const { page = 1, limit = 20, search, role, banned } = query;
+    const skip = (page - 1) * limit;
+
+    const queryBuilder = this.usersRepository
+      .createQueryBuilder("user")
+      .leftJoinAndSelect("user.kyc", "kyc");
+
+    if (search) {
+      queryBuilder.andWhere(
+        "(user.name ILIKE :search OR user.email ILIKE :search OR user.phone ILIKE :search OR user.username ILIKE :search)",
+        { search: `%${search}%` }
+      );
+    }
+
+    if (role) {
+      queryBuilder.andWhere("user.role = :role", { role });
+    }
+
+    if (banned === "picking") {
+      queryBuilder.andWhere(
+        '(user."permanentlyBannedFromPicking" = true OR user."runnerBannedUntil" > NOW())'
+      );
+    } else if (banned === "posting") {
+      queryBuilder.andWhere(
+        '(user."permanentlyBannedFromPosting" = true OR user."requesterBannedUntil" > NOW())'
+      );
+    }
+
+    const [data, total] = await queryBuilder
+      .orderBy("user.createdAt", "DESC")
+      .skip(skip)
+      .take(limit)
+      .getManyAndCount();
+
+    return { data, total, page, limit };
+  }
+
   async findByWhatsappNumber(whatsappNumber: string): Promise<User | null> {
     return this.usersRepository.findOne({ where: { whatsappNumber } });
   }
@@ -128,9 +172,22 @@ export class UsersService {
       avatarUrl: user.avatarUrl,
       ratingAvg: user.ratingAvg,
       verified: user.verified,
+      identityVerified: this.isIdentityVerified(user),
       role: user.role,
       memberSince: user.createdAt,
     };
+  }
+
+  /**
+   * True only once an admin has approved this user's KYC submission (NIN +
+   * submitted photo both reviewed - see KycService.approveKyc). Distinct
+   * from `User.verified`, which is set purely on email verification
+   * (UsersService.setVerified) and never touches identity/KYC at all.
+   * Requires `user.kyc` to be loaded (findOne already loads it via
+   * `relations: ["kyc"]`).
+   */
+  isIdentityVerified(user: User): boolean {
+    return user.kyc?.status === KYCStatus.APPROVED;
   }
 
   async getPublicProfile(id: string) {
@@ -270,7 +327,7 @@ export class UsersService {
       const banDurationMs = banDurationsMs[user.banEscalationLevel];
       if (banDurationMs === undefined) {
         user.permanentlyBannedFromPicking = true;
-        user.runnerBannedUntil = undefined;
+        user.runnerBannedUntil = null;
       } else {
         user.runnerBannedUntil = new Date(Date.now() + banDurationMs);
         user.banEscalationLevel += 1;
@@ -296,7 +353,27 @@ export class UsersService {
   async liftPermanentBan(userId: string): Promise<User> {
     const user = await this.findOne(userId);
     user.permanentlyBannedFromPicking = false;
-    user.runnerBannedUntil = undefined;
+    user.runnerBannedUntil = null;
+    return this.usersRepository.save(user);
+  }
+
+  /**
+   * Admin-only manual pick-up ban, independent of the 3-strike escalation
+   * ladder (recordErrandFailure) - for cases the automatic system doesn't
+   * catch (reported abuse, fraud, etc). Defaults to a 72h timed ban (the
+   * ladder's first tier) when neither `permanent` nor `durationHours` is given.
+   */
+  async banFromPicking(userId: string, dto: BanUserDto): Promise<User> {
+    const user = await this.findOne(userId);
+    if (dto.permanent) {
+      user.permanentlyBannedFromPicking = true;
+      user.runnerBannedUntil = null;
+    } else {
+      user.permanentlyBannedFromPicking = false;
+      user.runnerBannedUntil = new Date(
+        Date.now() + (dto.durationHours ?? 72) * 60 * 60 * 1000
+      );
+    }
     return this.usersRepository.save(user);
   }
 
@@ -317,7 +394,7 @@ export class UsersService {
       const banDurationMs = banDurationsMs[user.postingBanEscalationLevel];
       if (banDurationMs === undefined) {
         user.permanentlyBannedFromPosting = true;
-        user.requesterBannedUntil = undefined;
+        user.requesterBannedUntil = null;
       } else {
         user.requesterBannedUntil = new Date(Date.now() + banDurationMs);
         user.postingBanEscalationLevel += 1;
@@ -338,7 +415,22 @@ export class UsersService {
   async liftPermanentPostingBan(userId: string): Promise<User> {
     const user = await this.findOne(userId);
     user.permanentlyBannedFromPosting = false;
-    user.requesterBannedUntil = undefined;
+    user.requesterBannedUntil = null;
+    return this.usersRepository.save(user);
+  }
+
+  /** Admin-only manual posting ban - mirrors banFromPicking. */
+  async banFromPosting(userId: string, dto: BanUserDto): Promise<User> {
+    const user = await this.findOne(userId);
+    if (dto.permanent) {
+      user.permanentlyBannedFromPosting = true;
+      user.requesterBannedUntil = null;
+    } else {
+      user.permanentlyBannedFromPosting = false;
+      user.requesterBannedUntil = new Date(
+        Date.now() + (dto.durationHours ?? 72) * 60 * 60 * 1000
+      );
+    }
     return this.usersRepository.save(user);
   }
 
