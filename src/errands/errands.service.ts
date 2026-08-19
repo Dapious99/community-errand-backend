@@ -359,6 +359,18 @@ export class ErrandsService {
       });
     }
 
+    // Completed/cancelled errands are noise in the general browse feed once
+    // they're no longer actionable - only show them here if the requesting
+    // user is a participant (their own errand history), otherwise they'd see
+    // other people's closed-out errands cluttering the listing.
+    queryBuilder.andWhere(
+      "(errand.status NOT IN (:...closedStatuses) OR errand.requesterId = :userId OR errand.runnerId = :userId)",
+      {
+        closedStatuses: [ErrandStatus.COMPLETED, ErrandStatus.CANCELLED],
+        userId,
+      }
+    );
+
     // Sorting
     switch (filters.sortBy) {
       case "price_high":
